@@ -52,7 +52,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
 
-                name TEXT NOT NULL,
+                task_name TEXT NOT NULL,
                 description TEXT,
                 deadline TEXT NOT NULL,
                 duration INTEGER NOT NULL,
@@ -75,7 +75,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS resources (
                 id TEXT PRIMARY KEY,
 
-                name TEXT NOT NULL,
+                task_name TEXT NOT NULL,
                 type TEXT NOT NULL,
                 isAvailable INTEGER NOT NULL,
                 cost REAL NOT NULL
