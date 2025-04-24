@@ -1,0 +1,10 @@
+[build]
+  base = "frontend"
+  command = "flutter pub get && flutter build web --release"
+  publish = "build/web"
+
+[build.environment]
+  FLUTTER_VERSION = "3.22.2"  # Remplacez par votre version de Flutter si nécessaire
+
+[[plugins]]
+  package = "@netlify/plugin-flutter"
