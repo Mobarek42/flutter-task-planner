@@ -9,13 +9,9 @@ import math
 import time
 import threading
 import logging
-import datetime
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, value
-
 
 app = Flask(__name__)
 CORS(app)
-
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,23 +31,17 @@ optimization_tasks = {}
 results_lock = threading.Lock()
 
 # Database connection
-
-@app.route('/')
-def home():
-    return "Backend de planification des tâches actif !"
-
 def get_db():
     conn = sqlite3.connect('tasks.db')
     conn.row_factory = sqlite3.Row
     return conn
 
-
+# Initialize database
 def init_db():
     with get_db() as conn:
         conn.execute('''
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
-
                 task_name TEXT NOT NULL,
                 description TEXT,
                 deadline TEXT NOT NULL,
@@ -59,60 +49,40 @@ def init_db():
                 priority INTEGER NOT NULL,
                 dependencies TEXT,
                 resources TEXT,
-                startTime TEXT
-
-                name TEXT,
-                description TEXT,
-                deadline TEXT,
-                duration INTEGER,
-                priority INTEGER,
-                startTime TEXT,
-                dependencies TEXT
-
+                start_time TEXT
             )
         ''')
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resources (
                 id TEXT PRIMARY KEY,
-
-                task_name TEXT NOT NULL,
+                name TEXT NOT NULL,
                 type TEXT NOT NULL,
                 isAvailable INTEGER NOT NULL,
                 cost REAL NOT NULL
-                name TEXT,
-                type TEXT,
-                isAvailable INTEGER,
-                cost REAL
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS task_resources (
-                taskId TEXT,
-                resourceId TEXT,
-                FOREIGN KEY(taskId) REFERENCES tasks(id),
-                FOREIGN KEY(resourceId) REFERENCES resources(id)
-
             )
         ''')
         conn.commit()
-
 
 # Migrate database to add missing columns
 def migrate_db():
     with get_db() as conn:
         try:
-            # Check and migrate tasks table (add startTime if missing)
+            # Check and migrate tasks table (add start_time and rename name to task_name if necessary)
             cursor = conn.execute('PRAGMA table_info(tasks)')
             columns = [info[1] for info in cursor.fetchall()]
-            if 'startTime' not in columns:
-                logger.info("Adding startTime column to tasks table")
-                conn.execute('ALTER TABLE tasks ADD COLUMN startTime TEXT')
+            if 'name' in columns:
+                logger.info("Renaming column name to task_name in tasks table")
+                conn.execute('ALTER TABLE tasks RENAME COLUMN name TO task_name')
                 conn.commit()
-                logger.info("Migration completed: startTime column added to tasks")
+            if 'start_time' not in columns:
+                logger.info("Adding start_time column to tasks table")
+                conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
+                conn.commit()
+                logger.info("Migration completed: start_time column added to tasks")
             else:
-                logger.info("startTime column already exists in tasks table")
+                logger.info("start_time column already exists in tasks table")
 
-            # Check and migrate resources table (add isAvailable if missing)
+            # Check and migrate resources table
             cursor = conn.execute('PRAGMA table_info(resources)')
             columns = [info[1] for info in cursor.fetchall()]
             if 'isAvailable' not in columns:
@@ -128,9 +98,9 @@ def migrate_db():
 
 # Task model
 class Task:
-    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, start_time=None):
+    def __init__(self, id, task_name, description, deadline, duration, priority, dependencies, resources, start_time=None):
         self.id = id
-        self.name = name
+        self.task_name = task_name
         self.description = description
         self.deadline = datetime.fromisoformat(deadline.replace('Z', '+00:00')) if isinstance(deadline, str) else deadline
         self.duration = duration
@@ -142,7 +112,7 @@ class Task:
     def to_dict(self):
         return {
             'id': self.id,
-            'name': self.name,
+            'name': self.task_name,  # Map to "name" for frontend compatibility
             'description': self.description,
             'deadline': self.deadline.isoformat(),
             'duration': self.duration,
@@ -179,8 +149,10 @@ def get_tasks():
         tasks_list = []
         for task in tasks:
             task_dict = dict(task)
+            task_dict['name'] = task_dict.pop('task_name')  # Convert task_name to name for frontend
             task_dict['dependencies'] = json.loads(task_dict['dependencies'] or '[]')
             task_dict['resources'] = json.loads(task_dict['resources'] or '[]')
+            task_dict['startTime'] = task_dict['start_time']
             tasks_list.append(task_dict)
         return jsonify(tasks_list)
 
@@ -231,7 +203,7 @@ def create_task():
 
         task = Task(
             id=data['id'],
-            name=data['name'],
+            task_name=data['name'],
             description=data.get('description', ''),
             deadline=data['deadline'],
             duration=duration,
@@ -244,11 +216,11 @@ def create_task():
         with get_db() as conn:
             try:
                 conn.execute('''
-                    INSERT INTO tasks (id, name, description, deadline, duration, priority, dependencies, resources, startTime)
+                    INSERT INTO tasks (id, task_name, description, deadline, duration, priority, dependencies, resources, start_time)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     task.id,
-                    task.name,
+                    task.task_name,
                     task.description,
                     task.deadline.isoformat(),
                     task.duration,
@@ -287,59 +259,11 @@ def delete_task(id):
 @app.route('/resources', methods=['GET'])
 def get_resources():
     logger.info("Received GET request for /resources")
-
-init_db()
-
-@app.route('/tasks', methods=['GET'])
-def get_tasks():
-    with get_db() as conn:
-        tasks = conn.execute('SELECT * FROM tasks').fetchall()
-        task_list = [dict(task) for task in tasks]
-        for task in task_list:
-            resources = conn.execute('SELECT resourceId FROM task_resources WHERE taskId = ?', (task['id'],)).fetchall()
-            task['resources'] = [r['resourceId'] for r in resources]
-        return jsonify(task_list)
-
-@app.route('/tasks', methods=['POST'])
-def add_task():
-    data = request.get_json()
-    task = {
-        'id': data['id'],
-        'name': data['name'],
-        'description': data['description'],
-        'deadline': data['deadline'],
-        'duration': data['duration'],
-        'priority': data['priority'],
-        'startTime': None,
-        'dependencies': ','.join(data['dependencies'])
-    }
-    resources = data.get('resources', [])
-    with get_db() as conn:
-        conn.execute('''
-            INSERT INTO tasks (id, name, description, deadline, duration, priority, startTime, dependencies)
-            VALUES (:id, :name, :description, :deadline, :duration, :priority, :startTime, :dependencies)
-        ''', task)
-        for res_id in resources:
-            conn.execute('INSERT INTO task_resources (taskId, resourceId) VALUES (?, ?)', (task['id'], res_id))
-        conn.commit()
-    return jsonify({'message': 'Tâche ajoutée', 'id': task['id']}), 201
-
-@app.route('/tasks/<task_id>', methods=['DELETE'])
-def delete_task(task_id):
-    with get_db() as conn:
-        conn.execute('DELETE FROM task_resources WHERE taskId = ?', (task_id,))
-        conn.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-        conn.commit()
-    return jsonify({'message': 'Tâche supprimée'})
-
-@app.route('/resources', methods=['GET'])
-def get_resources():
     with get_db() as conn:
         resources = conn.execute('SELECT * FROM resources').fetchall()
         return jsonify([dict(resource) for resource in resources])
 
 @app.route('/resources', methods=['POST'])
-
 def create_resource():
     logger.info("Received POST request for /resources")
     try:
@@ -440,7 +364,7 @@ def optimize():
             try:
                 task = Task(
                     id=t['id'],
-                    name=t['name'],
+                    task_name=t['name'],
                     description=t.get('description', ''),
                     deadline=t['deadline'],
                     duration=t['duration'],
@@ -841,111 +765,4 @@ def optimize_with_simulated_annealing(tasks, resources):
 if __name__ == '__main__':
     init_db()
     migrate_db()
-def add_resource():
-    data = request.get_json()
-    resource = {
-        'id': data['id'],
-        'name': data['name'],
-        'type': data['type'],
-        'isAvailable': 1 if data['isAvailable'] else 0,
-        'cost': data['cost']
-    }
-    with get_db() as conn:
-        conn.execute('''
-            INSERT INTO resources (id, name, type, isAvailable, cost)
-            VALUES (:id, :name, :type, :isAvailable, :cost)
-        ''', resource)
-        conn.commit()
-    return jsonify({'message': 'Ressource ajoutée', 'id': resource['id']}), 201
-
-@app.route('/resources/<resource_id>', methods=['DELETE'])
-def delete_resource(resource_id):
-    with get_db() as conn:
-        conn.execute('DELETE FROM task_resources WHERE resourceId = ?', (resource_id,))
-        conn.execute('DELETE FROM resources WHERE id = ?', (resource_id,))
-        conn.commit()
-    return jsonify({'message': 'Ressource supprimée'})
-
-@app.route('/optimize', methods=['POST'])
-def optimize_schedule():
-    data = request.get_json()
-    tasks = data.get('tasks', [])
-    resources = data.get('resources', [])
-    if not tasks:
-        return jsonify({'error': 'Aucune tâche fournie'}), 400
-
-    prob = LpProblem("Minimize_Makespan", LpMinimize)
-    start_times = {t['id']: LpVariable(f"start_{t['id']}", 0) for t in tasks}
-    makespan = LpVariable("makespan", 0)
-    prob += makespan
-
-    now = datetime.datetime.now()
-    for task in tasks:
-        deadline = datetime.datetime.fromisoformat(task['deadline'])
-        prob += start_times[task['id']] + task['duration'] <= (deadline - now).total_seconds() / 3600
-        if task['dependencies']:
-            for dep_id in task['dependencies']:
-                if dep_id:
-                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
-                    if dep_task:
-                        prob += start_times[task['id']] >= start_times[dep_id] + dep_task['duration']
-        prob += makespan >= start_times[task['id']] + task['duration']
-
-    resource_tasks = {}
-    for task in tasks:
-        for res_id in task.get('resources', []):
-            resource_tasks.setdefault(res_id, []).append(task['id'])
-
-    for res_id, task_ids in resource_tasks.items():
-        if len(task_ids) > 1:
-            for i in range(len(task_ids)):
-                for j in range(i + 1, len(task_ids)):
-                    t1 = next(t for t in tasks if t['id'] == task_ids[i])
-                    t2 = next(t for t in tasks if t['id'] == task_ids[j])
-                    b = LpVariable(f"b_{t1['id']}_{t2['id']}", 0, 1, cat='Binary')
-                    M = 1000
-                    prob += start_times[t1['id']] + t1['duration'] <= start_times[t2['id']] + M * (1 - b)
-                    prob += start_times[t2['id']] + t2['duration'] <= start_times[t1['id']] + M * b
-
-    prob.solve()
-    if prob.status != 1:  # 1 = Optimal
-        return jsonify({'error': 'Aucune solution optimale trouvée'}), 500
-
-    optimized_tasks = []
-    for task in tasks:
-        start_time = now + datetime.timedelta(hours=value(start_times[task['id']]))
-        task['startTime'] = start_time.isoformat()
-        optimized_tasks.append(task)
-
-    throughput = len(tasks) / value(makespan) if value(makespan) > 0 else 0
-
-    with get_db() as conn:
-        conn.execute('DELETE FROM tasks')
-        conn.execute('DELETE FROM task_resources')
-        for task in optimized_tasks:
-            conn.execute('''
-                INSERT INTO tasks (id, name, description, deadline, duration, priority, startTime, dependencies)
-                VALUES (:id, :name, :description, :deadline, :duration, :priority, :startTime, :dependencies)
-            ''', {
-                'id': task['id'],
-                'name': task['name'],
-                'description': task['description'],
-                'deadline': task['deadline'],
-                'duration': task['duration'],
-                'priority': task['priority'],
-                'startTime': task['startTime'],
-                'dependencies': ','.join(task['dependencies'])
-            })
-            for res_id in task.get('resources', []):
-                conn.execute('INSERT INTO task_resources (taskId, resourceId) VALUES (?, ?)', (task['id'], res_id))
-        conn.commit()
-
-    return jsonify({
-        'makespan': value(makespan),
-        'throughput': throughput,
-        'tasks': optimized_tasks
-    })
-
-if __name__ == '__main__':
-
     app.run(host='0.0.0.0', port=3000, debug=True)
