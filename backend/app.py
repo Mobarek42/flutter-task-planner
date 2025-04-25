@@ -39,7 +39,6 @@ def get_db():
 # Initialize database
 def init_db():
     with get_db() as conn:
-        # Create the table only if it doesn't exist
         conn.execute('''
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
@@ -50,7 +49,7 @@ def init_db():
                 priority INTEGER NOT NULL,
                 dependencies TEXT,
                 resources TEXT,
-                start_time TEXT
+                startTime TEXT
             )
         ''')
         conn.execute('''
@@ -63,32 +62,23 @@ def init_db():
             )
         ''')
         conn.commit()
-        logger.info("Database initialized with updated schema")
 
-# Migrate database to rename or add missing columns
+# Migrate database to add missing columns
 def migrate_db():
     with get_db() as conn:
         try:
-            # Check and migrate tasks table
+            # Check and migrate tasks table (add startTime if missing)
             cursor = conn.execute('PRAGMA table_info(tasks)')
             columns = [info[1] for info in cursor.fetchall()]
-            
-            # Check for start_time or startTime
-            if 'start_time' not in columns:
-                if 'startTime' in columns:
-                    logger.info("Renaming column startTime to start_time in tasks table")
-                    conn.execute('ALTER TABLE tasks RENAME COLUMN startTime TO start_time')
-                    conn.commit()
-                    logger.info("Migration completed: startTime renamed to start_time")
-                else:
-                    logger.info("Adding start_time column to tasks table")
-                    conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
-                    conn.commit()
-                    logger.info("Migration completed: start_time column added to tasks")
+            if 'startTime' not in columns:
+                logger.info("Adding startTime column to tasks table")
+                conn.execute('ALTER TABLE tasks ADD COLUMN startTime TEXT')
+                conn.commit()
+                logger.info("Migration completed: startTime column added to tasks")
             else:
-                logger.info("start_time column already exists in tasks table")
+                logger.info("startTime column already exists in tasks table")
 
-            # Check and migrate resources table (if needed)
+            # Check and migrate resources table (add isAvailable if missing)
             cursor = conn.execute('PRAGMA table_info(resources)')
             columns = [info[1] for info in cursor.fetchall()]
             if 'isAvailable' not in columns:
@@ -100,24 +90,7 @@ def migrate_db():
                 logger.info("isAvailable column already exists in resources table")
         except sqlite3.Error as e:
             logger.error(f"Error during database migration: {e}")
-            # Fallback: Drop and recreate the tasks table if migration fails
-            logger.info("Dropping and recreating tasks table due to migration failure")
-            conn.execute('DROP TABLE IF EXISTS tasks')
-            conn.execute('''
-                CREATE TABLE tasks (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    deadline TEXT NOT NULL,
-                    duration INTEGER NOT NULL,
-                    priority INTEGER NOT NULL,
-                    dependencies TEXT,
-                    resources TEXT,
-                    start_time TEXT
-                )
-            ''')
-            conn.commit()
-            logger.info("Tasks table recreated successfully")
+            raise
 
 # Task model
 class Task:
@@ -174,7 +147,6 @@ def get_tasks():
             task_dict = dict(task)
             task_dict['dependencies'] = json.loads(task_dict['dependencies'] or '[]')
             task_dict['resources'] = json.loads(task_dict['resources'] or '[]')
-            task_dict['startTime'] = task_dict['start_time']
             tasks_list.append(task_dict)
         return jsonify(tasks_list)
 
@@ -209,10 +181,7 @@ def create_task():
 
         # Validate deadline format
         try:
-            deadline_dt = datetime.fromisoformat(data['deadline'].replace('Z', '+00:00'))
-            if deadline_dt < datetime.now():
-                logger.error(f"Deadline in the past: {data['deadline']}")
-                return jsonify({'error': 'Deadline cannot be in the past'}), 400
+            datetime.fromisoformat(data['deadline'].replace('Z', '+00:00'))
         except ValueError:
             logger.error(f"Invalid deadline format: {data['deadline']}")
             return jsonify({'error': 'Invalid deadline format'}), 400
@@ -241,7 +210,7 @@ def create_task():
         with get_db() as conn:
             try:
                 conn.execute('''
-                    INSERT INTO tasks (id, name, description, deadline, duration, priority, dependencies, resources, start_time)
+                    INSERT INTO tasks (id, name, description, deadline, duration, priority, dependencies, resources, startTime)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     task.id,
@@ -512,18 +481,6 @@ def optimize_with_pulp(tasks, resources):
         R = len(resources)
         M = 10000
 
-        # Validate inputs to prevent solver crashes
-        for task in tasks:
-            if task.duration <= 0:
-                raise ValueError(f"Task {task.id} has invalid duration: {task.duration}")
-            deadline_hours = (task.deadline - now).total_seconds() / 3600
-            if deadline_hours < 0:
-                raise ValueError(f"Task {task.id} has a deadline in the past: {task.deadline}")
-            if deadline_hours < task.duration:
-                logger.warning(f"Task {task.id} has infeasible deadline: {deadline_hours}h < {task.duration}h duration")
-                # Adjust deadline to make the problem feasible
-                task.deadline = now + timedelta(hours=task.duration + 1)
-
         start_times = pulp.LpVariable.dicts("Start", range(T), lowBound=0, cat='Continuous')
         resource_assignments = pulp.LpVariable.dicts("Assign", [(i, j) for i in range(T) for j in range(R)], cat='Binary')
         makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Continuous')
@@ -564,8 +521,7 @@ def optimize_with_pulp(tasks, resources):
                         prob += start_times[t] + task_t.duration <= start_times[s] + M * (1 - overlap)
                         prob += start_times[s] + task_s.duration <= start_times[t] + M * overlap
 
-        # Solve with a time limit to prevent hanging
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=10))
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
         if status != pulp.LpStatusOptimal:
             logger.error(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
             raise ValueError(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
@@ -802,5 +758,5 @@ def optimize_with_simulated_annealing(tasks, resources):
 
 if __name__ == '__main__':
     init_db()
-    migrate_db()  # Call migrate_db after init_db to apply migrations
+    migrate_db()
     app.run(host='0.0.0.0', port=3000, debug=True)

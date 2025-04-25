@@ -158,7 +158,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Map<String, double> _penalties = {};
   bool _isLoading = false;
   String _optimizationMethod = 'PuLP';
-  final String _baseUrl = 'https://flutter-task-planner-3.onrender.com';
+  final String _baseUrl = 'https://didactic-space-broccoli-pqq9r55pv9ph6wpq-3000.app.github.dev';
 
   String _searchQuery = '';
   int? _priorityFilter;
