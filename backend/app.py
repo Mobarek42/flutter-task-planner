@@ -100,7 +100,24 @@ def migrate_db():
                 logger.info("isAvailable column already exists in resources table")
         except sqlite3.Error as e:
             logger.error(f"Error during database migration: {e}")
-            raise
+            # If migration fails, drop the tasks table and recreate it
+            logger.info("Dropping and recreating tasks table due to migration failure")
+            conn.execute('DROP TABLE IF EXISTS tasks')
+            conn.execute('''
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    deadline TEXT NOT NULL,
+                    duration INTEGER NOT NULL,
+                    priority INTEGER NOT NULL,
+                    dependencies TEXT,
+                    resources TEXT,
+                    start_time TEXT
+                )
+            ''')
+            conn.commit()
+            logger.info("Tasks table recreated successfully")
 
 # Task model
 class Task:
