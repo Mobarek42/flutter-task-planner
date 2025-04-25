@@ -377,11 +377,14 @@ class _HomeScreenState extends State<HomeScreen> {
       );
 
       if (response.statusCode == 201) {
-      // Ne pas ajouter la tâche localement avant le fetch
-        await _fetchTasks(); // Recharger toutes les tâches depuis le backend
+        // Ne pas ajouter la tâche localement avant le fetch
         setState(() {
-          _applyFilters(); // Mettre à jour les filtres après le fetch
+          _tasks.add(task);
+          _applyFilters();
         });
+
+        // Ensuite, mettre à jour avec les données du serveur
+        await _fetchTasks();
         _showSuccess('Task added successfully');
       } else {
         _showError('Error adding task: ${response.statusCode}');
@@ -394,6 +397,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   
   }
+  
 
   // Add a new resource
   Future<void> _addResource(Resource resource) async {
@@ -1071,133 +1075,143 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Show dialog to add a new resource
   void _showAddResourceDialog() {
-    final nameController = TextEditingController();
-    final costController = TextEditingController();
-    String type = 'Personnel';
-    bool isAvailable = true;
+  final nameController = TextEditingController();
+  final costController = TextEditingController();
+  String type = 'Personnel';
+  bool isAvailable = true;
 
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New Resource'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Name', border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 10),
-            DropdownButton<String>(
-              value: type,
-              items: ['Personnel', 'Machine', 'Server'].map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-              onChanged: (val) => setState(() => type = val!),
-            ),
-            SwitchListTile(
-              title: const Text('Available'),
-              value: isAvailable,
-              onChanged: (val) => setState(() => isAvailable = val),
-            ),
-            TextField(
-              controller: costController,
-              decoration: const InputDecoration(labelText: 'Cost', border: OutlineInputBorder()),
-              keyboardType: TextInputType.number,
+  showDialog(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) {
+        return AlertDialog(
+          title: const Text('New Resource'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'Name', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              DropdownButton<String>(
+                value: type,
+                items: ['Personnel', 'Machine', 'Server'].map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                onChanged: (val) => setState(() => type = val!),
+              ),
+              SwitchListTile(
+                title: const Text('Available'),
+                value: isAvailable,
+                onChanged: (val) => setState(() => isAvailable = val),
+              ),
+              TextField(
+                controller: costController,
+                decoration: const InputDecoration(labelText: 'Cost', border: OutlineInputBorder()),
+                keyboardType: TextInputType.number,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.isEmpty) {
+                  _showError('Resource name is required');
+                  return;
+                }
+                if (double.tryParse(costController.text) == null) {
+                  _showError('Please enter a valid cost');
+                  return;
+                }
+                final newResource = Resource(
+                  id: DateTime.now().millisecondsSinceEpoch.toString(),
+                  name: nameController.text,
+                  type: type,
+                  isAvailable: isAvailable,
+                  cost: double.tryParse(costController.text) ?? 0.0,
+                );
+                Navigator.pop(context);
+                _addResource(newResource);
+              },
+              child: const Text('Add'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.isEmpty) {
-                _showError('Resource name is required');
-                return;
-              }
-              if (double.tryParse(costController.text) == null) {
-                _showError('Please enter a valid cost');
-                return;
-              }
-              final newResource = Resource(
-                id: DateTime.now().millisecondsSinceEpoch.toString(),
-                name: nameController.text,
-                type: type,
-                isAvailable: isAvailable,
-                cost: double.tryParse(costController.text) ?? 0.0,
-              );
-              Navigator.pop(context);
-              _addResource(newResource);
-            },
-            child: const Text('Add'),
-          ),
-        ],
-      ),
-    );
-  }
+        );
+      },
+    ),
+  );
+ }
+
 
   // Show dialog to edit a resource
   void _showEditResourceDialog(Resource resource) {
-    final nameController = TextEditingController(text: resource.name);
-    final costController = TextEditingController(text: resource.cost.toString());
-    String type = resource.type;
-    bool isAvailable = resource.isAvailable;
+  final nameController = TextEditingController(text: resource.name);
+  final costController = TextEditingController(text: resource.cost.toString());
+  String type = resource.type;
+  bool isAvailable = resource.isAvailable;
 
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Edit Resource'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Name', border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 10),
-            DropdownButton<String>(
-              value: type,
-              items: ['Personnel', 'Machine', 'Server'].map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
-              onChanged: (val) => setState(() => type = val!),
-            ),
-            SwitchListTile(
-              title: const Text('Available'),
-              value: isAvailable,
-              onChanged: (val) => setState(() => isAvailable = val),
-            ),
-            TextField(
-              controller: costController,
-              decoration: const InputDecoration(labelText: 'Cost', border: OutlineInputBorder()),
-              keyboardType: TextInputType.number,
+  showDialog(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) {
+        return AlertDialog(
+          title: const Text('Edit Resource'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'Name', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 10),
+              DropdownButton<String>(
+                value: type,
+                items: ['Personnel', 'Machine', 'Server'].map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                onChanged: (val) => setState(() => type = val!),
+              ),
+              SwitchListTile(
+                title: const Text('Available'),
+                value: isAvailable,
+                onChanged: (val) => setState(() => isAvailable = val),
+              ),
+              TextField(
+                controller: costController,
+                decoration: const InputDecoration(labelText: 'Cost', border: OutlineInputBorder()),
+                keyboardType: TextInputType.number,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.isEmpty) {
+                  _showError('Resource name is required');
+                  return;
+                }
+                if (double.tryParse(costController.text) == null) {
+                  _showError('Please enter a valid cost');
+                  return;
+                }
+                final updatedResource = Resource(
+                  id: resource.id,
+                  name: nameController.text,
+                  type: type,
+                  isAvailable: isAvailable,
+                  cost: double.tryParse(costController.text) ?? 0.0,
+                );
+                Navigator.pop(context);
+                _updateResource(updatedResource);
+              },
+              child: const Text('Update'),
             ),
           ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () {
-              if (nameController.text.isEmpty) {
-                _showError('Resource name is required');
-                return;
-              }
-              if (double.tryParse(costController.text) == null) {
-                _showError('Please enter a valid cost');
-                return;
-              }
-              final updatedResource = Resource(
-                id: resource.id,
-                name: nameController.text,
-                type: type,
-                isAvailable: isAvailable,
-                cost: double.tryParse(costController.text) ?? 0.0,
-              );
-              Navigator.pop(context);
-              _updateResource(updatedResource);
-            },
-            child: const Text('Update'),
-          ),
-        ],
-      ),
-    );
-  }
+        );
+      },
+    ),
+  );
+ }
+
 
   // Export planning to CSV
   Future<void> _exportPlanning() async {
