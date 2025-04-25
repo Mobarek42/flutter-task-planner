@@ -449,7 +449,7 @@ def run_optimization(tasks, resources, method, result_id):
         logger.info(f"Running optimization for result_id {result_id} with method {method}")
         start_time = time.time()
         if method == 'PuLP':
-            result = optimize_with_pulp(tasks, resources)
+            result = optimize_with_pulp(tasks, resources, result_id)
         else:
             result = optimize_with_simulated_annealing(tasks, resources)
         if time.time() - start_time > OPTIMIZATION_TIMEOUT:
