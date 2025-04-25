@@ -65,7 +65,7 @@ def init_db():
         conn.commit()
         logger.info("Database initialized with updated schema")
 
-# Migrate database to add missing columns
+# Migrate database to add missing columns or rename incorrect ones
 def migrate_db():
     with get_db() as conn:
         try:
@@ -79,12 +79,18 @@ def migrate_db():
                 conn.execute('ALTER TABLE tasks RENAME COLUMN task_name TO name')
                 conn.commit()
             
-            # Add missing columns if they don't exist
+            # Check for start_time or startTime
             if 'start_time' not in columns:
-                logger.info("Adding start_time column to tasks table")
-                conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
-                conn.commit()
-                logger.info("Migration completed: start_time column added to tasks")
+                if 'startTime' in columns:
+                    logger.info("Renaming column startTime to start_time in tasks table")
+                    conn.execute('ALTER TABLE tasks RENAME COLUMN startTime TO start_time')
+                    conn.commit()
+                    logger.info("Migration completed: startTime renamed to start_time")
+                else:
+                    logger.info("Adding start_time column to tasks table")
+                    conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
+                    conn.commit()
+                    logger.info("Migration completed: start_time column added to tasks")
             else:
                 logger.info("start_time column already exists in tasks table")
 
