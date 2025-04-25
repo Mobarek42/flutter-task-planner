@@ -39,10 +39,12 @@ def get_db():
 # Initialize database
 def init_db():
     with get_db() as conn:
+        # Drop the existing table to ensure a clean schema
+        conn.execute('DROP TABLE IF EXISTS tasks')
         conn.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
+            CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
-                task_name TEXT NOT NULL,
+                name TEXT NOT NULL,
                 description TEXT,
                 deadline TEXT NOT NULL,
                 duration INTEGER NOT NULL,
@@ -62,18 +64,23 @@ def init_db():
             )
         ''')
         conn.commit()
+        logger.info("Database initialized with updated schema")
 
 # Migrate database to add missing columns
 def migrate_db():
     with get_db() as conn:
         try:
-            # Check and migrate tasks table (add start_time and rename name to task_name if necessary)
+            # Check and migrate tasks table
             cursor = conn.execute('PRAGMA table_info(tasks)')
             columns = [info[1] for info in cursor.fetchall()]
-            if 'name' in columns:
-                logger.info("Renaming column name to task_name in tasks table")
-                conn.execute('ALTER TABLE tasks RENAME COLUMN name TO task_name')
+            
+            # If task_name exists, rename it to name
+            if 'task_name' in columns:
+                logger.info("Renaming column task_name to name in tasks table")
+                conn.execute('ALTER TABLE tasks RENAME COLUMN task_name TO name')
                 conn.commit()
+            
+            # Add missing columns if they don't exist
             if 'start_time' not in columns:
                 logger.info("Adding start_time column to tasks table")
                 conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
@@ -98,9 +105,9 @@ def migrate_db():
 
 # Task model
 class Task:
-    def __init__(self, id, task_name, description, deadline, duration, priority, dependencies, resources, start_time=None):
+    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, start_time=None):
         self.id = id
-        self.task_name = task_name
+        self.name = name
         self.description = description
         self.deadline = datetime.fromisoformat(deadline.replace('Z', '+00:00')) if isinstance(deadline, str) else deadline
         self.duration = duration
@@ -112,7 +119,7 @@ class Task:
     def to_dict(self):
         return {
             'id': self.id,
-            'name': self.task_name,  # Map to "name" for frontend compatibility
+            'name': self.name,
             'description': self.description,
             'deadline': self.deadline.isoformat(),
             'duration': self.duration,
@@ -149,7 +156,6 @@ def get_tasks():
         tasks_list = []
         for task in tasks:
             task_dict = dict(task)
-            task_dict['name'] = task_dict.pop('task_name')  # Convert task_name to name for frontend
             task_dict['dependencies'] = json.loads(task_dict['dependencies'] or '[]')
             task_dict['resources'] = json.loads(task_dict['resources'] or '[]')
             task_dict['startTime'] = task_dict['start_time']
@@ -187,7 +193,10 @@ def create_task():
 
         # Validate deadline format
         try:
-            datetime.fromisoformat(data['deadline'].replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(data['deadline'].replace('Z', '+00:00'))
+            if deadline_dt < datetime.now():
+                logger.error(f"Deadline in the past: {data['deadline']}")
+                return jsonify({'error': 'Deadline cannot be in the past'}), 400
         except ValueError:
             logger.error(f"Invalid deadline format: {data['deadline']}")
             return jsonify({'error': 'Invalid deadline format'}), 400
@@ -203,7 +212,7 @@ def create_task():
 
         task = Task(
             id=data['id'],
-            task_name=data['name'],
+            name=data['name'],
             description=data.get('description', ''),
             deadline=data['deadline'],
             duration=duration,
@@ -216,11 +225,11 @@ def create_task():
         with get_db() as conn:
             try:
                 conn.execute('''
-                    INSERT INTO tasks (id, task_name, description, deadline, duration, priority, dependencies, resources, start_time)
+                    INSERT INTO tasks (id, name, description, deadline, duration, priority, dependencies, resources, start_time)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     task.id,
-                    task.task_name,
+                    task.name,
                     task.description,
                     task.deadline.isoformat(),
                     task.duration,
@@ -364,7 +373,7 @@ def optimize():
             try:
                 task = Task(
                     id=t['id'],
-                    task_name=t['name'],
+                    name=t['name'],
                     description=t.get('description', ''),
                     deadline=t['deadline'],
                     duration=t['duration'],
@@ -487,6 +496,18 @@ def optimize_with_pulp(tasks, resources):
         R = len(resources)
         M = 10000
 
+        # Validate inputs to prevent solver crashes
+        for task in tasks:
+            if task.duration <= 0:
+                raise ValueError(f"Task {task.id} has invalid duration: {task.duration}")
+            deadline_hours = (task.deadline - now).total_seconds() / 3600
+            if deadline_hours < 0:
+                raise ValueError(f"Task {task.id} has a deadline in the past: {task.deadline}")
+            if deadline_hours < task.duration:
+                logger.warning(f"Task {task.id} has infeasible deadline: {deadline_hours}h < {task.duration}h duration")
+                # Adjust deadline to make the problem feasible
+                task.deadline = now + timedelta(hours=task.duration + 1)
+
         start_times = pulp.LpVariable.dicts("Start", range(T), lowBound=0, cat='Continuous')
         resource_assignments = pulp.LpVariable.dicts("Assign", [(i, j) for i in range(T) for j in range(R)], cat='Binary')
         makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Continuous')
@@ -527,7 +548,8 @@ def optimize_with_pulp(tasks, resources):
                         prob += start_times[t] + task_t.duration <= start_times[s] + M * (1 - overlap)
                         prob += start_times[s] + task_s.duration <= start_times[t] + M * overlap
 
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        # Solve with a time limit to prevent hanging
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=10))
         if status != pulp.LpStatusOptimal:
             logger.error(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
             raise ValueError(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
