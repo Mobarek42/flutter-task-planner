@@ -51,7 +51,7 @@ def init_db():
                 priority INTEGER NOT NULL,
                 dependencies TEXT,
                 resources TEXT,
-                start_time TEXT
+                startTime TEXT
             )
         ''')
         conn.execute('''
@@ -81,13 +81,13 @@ def migrate_db():
                 conn.commit()
             
             # Add missing columns if they don't exist
-            if 'start_time' not in columns:
+            if 'startTime' not in columns:
                 logger.info("Adding start_time column to tasks table")
-                conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
+                conn.execute('ALTER TABLE tasks ADD COLUMN startTime TEXT')
                 conn.commit()
-                logger.info("Migration completed: start_time column added to tasks")
+                logger.info("Migration completed: startTime column added to tasks")
             else:
-                logger.info("start_time column already exists in tasks table")
+                logger.info("startTime column already exists in tasks table")
 
             # Check and migrate resources table
             cursor = conn.execute('PRAGMA table_info(resources)')
@@ -105,7 +105,7 @@ def migrate_db():
 
 # Task model
 class Task:
-    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, start_time=None):
+    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, startTime=None):
         self.id = id
         self.name = name
         self.description = description
@@ -114,7 +114,7 @@ class Task:
         self.priority = priority
         self.dependencies = dependencies if dependencies else []
         self.resources = resources if resources else []
-        self.start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00')) if start_time else None
+        self.startTime = datetime.fromisoformat(startTime.replace('Z', '+00:00')) if startTime else None
 
     def to_dict(self):
         return {
@@ -126,7 +126,7 @@ class Task:
             'priority': self.priority,
             'dependencies': self.dependencies,
             'resources': self.resources,
-            'startTime': self.start_time.isoformat() if self.start_time else None
+            'startTime': self.startTime.isoformat() if self.startTime else None
         }
 
 # Resource model
@@ -158,7 +158,7 @@ def get_tasks():
             task_dict = dict(task)
             task_dict['dependencies'] = json.loads(task_dict['dependencies'] or '[]')
             task_dict['resources'] = json.loads(task_dict['resources'] or '[]')
-            task_dict['startTime'] = task_dict['start_time']
+            task_dict['startTime'] = task_dict['startTime']
             tasks_list.append(task_dict)
         return jsonify(tasks_list)
 
@@ -202,12 +202,12 @@ def create_task():
             return jsonify({'error': 'Invalid deadline format'}), 400
 
         # Validate startTime if provided
-        start_time = data.get('startTime')
-        if start_time:
+        startTime = data.get('startTime')
+        if startTime:
             try:
-                datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                datetime.fromisoformat(startTime.replace('Z', '+00:00'))
             except ValueError:
-                logger.error(f"Invalid startTime format: {start_time}")
+                logger.error(f"Invalid startTime format: {startTime}")
                 return jsonify({'error': 'Invalid startTime format'}), 400
 
         task = Task(
@@ -219,7 +219,7 @@ def create_task():
             priority=priority,
             dependencies=data.get('dependencies', []),
             resources=data.get('resources', []),
-            start_time=start_time
+            start_time=startTime
         )
 
         with get_db() as conn:
@@ -236,7 +236,7 @@ def create_task():
                     task.priority,
                     json.dumps(task.dependencies),
                     json.dumps(task.resources),
-                    task.start_time.isoformat() if task.start_time else None
+                    task.startTime.isoformat() if task.startTime else None
                 ))
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -380,7 +380,7 @@ def optimize():
                     priority=t['priority'],
                     dependencies=t.get('dependencies', []),
                     resources=t.get('resources', []),
-                    start_time=t.get('startTime')
+                    startTime=t.get('startTime')
                 )
                 if task.duration <= 0:
                     raise ValueError(f"Invalid duration for task {task.id}: {task.duration}")
@@ -607,8 +607,8 @@ def optimize_with_simulated_annealing(tasks, resources):
         now = datetime.now()
 
         for i, task in enumerate(tasks):
-            start_time = schedule[i]
-            end_time = start_time + task.duration
+            startTime = schedule[i]
+            end_time = startTime + task.duration
             deadline_hours = (task.deadline - now).total_seconds() / 3600
             penalty = max(0, end_time - deadline_hours) * task.priority * 100
             penalties[task.id] = penalty
@@ -700,8 +700,8 @@ def optimize_with_simulated_annealing(tasks, resources):
             raise ValueError("Final schedule violates dependencies")
         now = datetime.now()
         for i, task in enumerate(tasks):
-            start_time = schedule[i]
-            end_time = start_time + task.duration
+            startTime = schedule[i]
+            end_time = startTime + task.duration
             deadline_hours = (task.deadline - now).total_seconds() / 3600
             if end_time > deadline_hours:
                 logger.warning(f"Task {task.id} misses deadline: end={end_time}, deadline={deadline_hours}")
