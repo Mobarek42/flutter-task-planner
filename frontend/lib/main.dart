@@ -367,15 +367,21 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_validateTask(task, _tasks)) {
       return;
     }
-    setState(() => _isLoading = true);
+
+    setState(() => _isLoading = true); // Afficher l'indicateur de chargement
     try {
       final response = await http.post(
         Uri.parse('$_baseUrl/tasks'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(task.toJson()),
       );
+
       if (response.statusCode == 201) {
-        await _fetchTasks();
+      // Ne pas ajouter la tâche localement avant le fetch
+        await _fetchTasks(); // Recharger toutes les tâches depuis le backend
+        setState(() {
+          _applyFilters(); // Mettre à jour les filtres après le fetch
+        });
         _showSuccess('Task added successfully');
       } else {
         _showError('Error adding task: ${response.statusCode}');
@@ -383,8 +389,10 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       _showError('Network error in _addTask: $e');
     } finally {
-      setState(() => _isLoading = false);
+      setState(() => _isLoading = false); // Cacher l'indicateur de chargement
     }
+
+  
   }
 
   // Add a new resource
