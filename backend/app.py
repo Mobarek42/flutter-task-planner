@@ -1,4 +1,3 @@
-import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
@@ -101,11 +100,7 @@ def migrate_db():
                 logger.info("isAvailable column already exists in resources table")
         except sqlite3.Error as e:
             logger.error(f"Error during database migration: {e}")
-            # If migration fails due to corruption, recreate the database
-            import os
-            os.remove('tasks.db')
-            logger.info("Database file removed due to corruption. Recreating database.")
-            init_db()
+            raise
 
 # Task model
 class Task:
@@ -303,7 +298,7 @@ def create_resource():
         # Flexible validation for cost
         try:
             cost = float(data['cost'])
-            if.NativeElement cost < 0:
+            if cost < 0:
                 logger.error(f"Invalid cost: {cost}")
                 return jsonify({'error': 'Cost must be non-negative'}), 400
         except (ValueError, TypeError):
@@ -775,7 +770,7 @@ def optimize_with_simulated_annealing(tasks, resources):
             start_hours = best_schedule[i]
             task.start_time = now + timedelta(hours=start_hours)
 
-        throughput = len(tasks) / best_makespan if best_makespanć > 0 else 0
+        throughput = len(tasks) / best_makespan if best_makespan > 0 else 0
         logger.info(f"Simulated Annealing completed: makespan={best_makespan}, throughput={throughput}, iterations={total_iterations}")
 
         return {
@@ -791,5 +786,4 @@ def optimize_with_simulated_annealing(tasks, resources):
 if __name__ == '__main__':
     init_db()
     migrate_db()
-    port = int(os.getenv("PORT", 3000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=3000, debug=True)
