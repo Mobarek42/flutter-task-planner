@@ -39,9 +39,14 @@ def get_db():
 # Initialize database
 def init_db():
     with get_db() as conn:
-        # Create the table only if it doesn't exist
+        # Drop existing tables to ensure a clean slate
+        conn.execute('DROP TABLE IF EXISTS tasks')
+        conn.execute('DROP TABLE IF EXISTS resources')
+        logger.info("Dropped existing tables to reset database schema")
+        
+        # Create the tasks table with the correct schema
         conn.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
+            CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -53,8 +58,9 @@ def init_db():
                 start_time TEXT
             )
         ''')
+        # Create the resources table
         conn.execute('''
-            CREATE TABLE IF NOT EXISTS resources (
+            CREATE TABLE resources (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 type TEXT NOT NULL,
@@ -63,67 +69,10 @@ def init_db():
             )
         ''')
         conn.commit()
-        logger.info("Database initialized with updated schema")
+        logger.info("Database initialized with fresh schema")
 
-# Migrate database to add missing columns or rename incorrect ones
-def migrate_db():
-    with get_db() as conn:
-        try:
-            # Check and migrate tasks table
-            cursor = conn.execute('PRAGMA table_info(tasks)')
-            columns = [info[1] for info in cursor.fetchall()]
-            
-            # If task_name exists, rename it to name
-            if 'task_name' in columns:
-                logger.info("Renaming column task_name to name in tasks table")
-                conn.execute('ALTER TABLE tasks RENAME COLUMN task_name TO name')
-                conn.commit()
-            
-            # Check for start_time or startTime
-            if 'start_time' not in columns:
-                if 'startTime' in columns:
-                    logger.info("Renaming column startTime to start_time in tasks table")
-                    conn.execute('ALTER TABLE tasks RENAME COLUMN startTime TO start_time')
-                    conn.commit()
-                    logger.info("Migration completed: startTime renamed to start_time")
-                else:
-                    logger.info("Adding start_time column to tasks table")
-                    conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
-                    conn.commit()
-                    logger.info("Migration completed: start_time column added to tasks")
-            else:
-                logger.info("start_time column already exists in tasks table")
-
-            # Check and migrate resources table
-            cursor = conn.execute('PRAGMA table_info(resources)')
-            columns = [info[1] for info in cursor.fetchall()]
-            if 'isAvailable' not in columns:
-                logger.info("Adding isAvailable column to resources table")
-                conn.execute('ALTER TABLE resources ADD COLUMN isAvailable INTEGER NOT NULL DEFAULT 1')
-                conn.commit()
-                logger.info("Migration completed: isAvailable column added to resources")
-            else:
-                logger.info("isAvailable column already exists in resources table")
-        except sqlite3.Error as e:
-            logger.error(f"Error during database migration: {e}")
-            # If migration fails, drop the tasks table and recreate it
-            logger.info("Dropping and recreating tasks table due to migration failure")
-            conn.execute('DROP TABLE IF EXISTS tasks')
-            conn.execute('''
-                CREATE TABLE tasks (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    deadline TEXT NOT NULL,
-                    duration INTEGER NOT NULL,
-                    priority INTEGER NOT NULL,
-                    dependencies TEXT,
-                    resources TEXT,
-                    start_time TEXT
-                )
-            ''')
-            conn.commit()
-            logger.info("Tasks table recreated successfully")
+# Remove migrate_db since we're forcing a fresh schema
+# No need for migration if we're dropping and recreating tables
 
 # Task model
 class Task:
@@ -808,5 +757,4 @@ def optimize_with_simulated_annealing(tasks, resources):
 
 if __name__ == '__main__':
     init_db()
-    migrate_db()
     app.run(host='0.0.0.0', port=3000, debug=True)
