@@ -472,82 +472,176 @@ def run_optimization(tasks, resources, method, result_id):
             }
 
 # PuLP Optimization
-def optimize_with_pulp(tasks, resources):
+def optimize_with_pulp(tasks, resources, result_id):
+    """Optimize task scheduling using PuLP."""
     try:
-        logger.info("Starting PuLP optimization")
+        logger.info(f"Starting PuLP optimization for result_id: {result_id}")
+        
+        # Create a new problem
         prob = pulp.LpProblem("TaskScheduling", pulp.LpMinimize)
+        
+        # Get the current time as the starting point
         now = datetime.now()
-        T = len(tasks)
-        R = len(resources)
-        M = 10000
-
-        start_times = pulp.LpVariable.dicts("Start", range(T), lowBound=0, cat='Continuous')
-        resource_assignments = pulp.LpVariable.dicts("Assign", [(i, j) for i in range(T) for j in range(R)], cat='Binary')
-        makespan = pulp.LpVariable("Makespan", lowBound=0, cat='Continuous')
-
-        penalties = pulp.LpVariable.dicts("Penalty", range(T), lowBound=0, cat='Continuous')
-        total_penalty = pulp.lpSum([penalties[i] for i in range(T)])
-        prob += total_penalty + makespan
-
-        for i in range(T):
-            task = tasks[i]
-            deadline_hours = (task.deadline - now).total_seconds() / 3600
-            prob += start_times[i] >= 0
-            prob += start_times[i] + task.duration <= deadline_hours + M * penalties[i]
-            prob += start_times[i] + task.duration <= makespan
-            prob += penalties[i] >= 0
-
+        
+        # Calculate the maximum possible end time (latest deadline + sum of all durations)
+        max_end_time = max(task.deadline for task in tasks)
+        max_duration_sum = sum(task.duration for task in tasks)
+        horizon = max_end_time + timedelta(hours=max_duration_sum)
+        
+        # Create time slots (hourly intervals from now to horizon)
+        time_slots = []
+        current = now
+        while current <= horizon:
+            time_slots.append(current)
+            current += timedelta(hours=1)
+        
+        # Decision variables: x[task_id][time_slot] = 1 if task starts at time_slot, 0 otherwise
+        x = {}
+        for task in tasks:
+            x[task.id] = {}
+            for t in range(len(time_slots) - task.duration + 1):
+                x[task.id][t] = pulp.LpVariable(f"x_{task.id}_{t}", cat=pulp.LpBinary)
+        
+        # Constraint: Each task must start exactly once
+        for task in tasks:
+            prob += pulp.lpSum(x[task.id][t] for t in range(len(time_slots) - task.duration + 1)) == 1
+        
+        # Constraint: Resource capacity
+        resource_usage = {}
+        for r in resources:
+            if not r.is_available:
+                continue
+            resource_usage[r.id] = {}
+            for t in range(len(time_slots)):
+                resource_usage[r.id][t] = pulp.lpSum(
+                    x[task.id][t_start] 
+                    for task in tasks if r.id in task.resources
+                    for t_start in range(max(0, t - task.duration + 1), min(t + 1, len(time_slots) - task.duration + 1))
+                )
+                prob += resource_usage[r.id][t] <= 1  # Each resource can only be used by one task at a time
+        
+        # Constraint: Dependencies
+        for task in tasks:
             for dep_id in task.dependencies:
-                for j in range(T):
-                    if tasks[j].id == dep_id:
-                        prob += start_times[i] >= start_times[j] + tasks[j].duration
-                        break
-
-        for i in range(T):
-            task = tasks[i]
-            if task.resources:
-                assigned = pulp.lpSum([resource_assignments[(i, j)] for j in range(R) if resources[j].id in task.resources])
-                prob += assigned >= 1
-            else:
-                logger.warning(f"Task {task.id} has no resources assigned")
-
-        for j in range(R):
-            for t in range(T):
-                for s in range(t + 1, T):
-                    task_t = tasks[t]
-                    task_s = tasks[s]
-                    if resources[j].id in task_t.resources and resources[j].id in task_s.resources:
-                        overlap = pulp.LpVariable(f"Overlap_{t}_{s}_{j}", cat='Binary')
-                        prob += start_times[t] + task_t.duration <= start_times[s] + M * (1 - overlap)
-                        prob += start_times[s] + task_s.duration <= start_times[t] + M * overlap
-
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
-        if status != pulp.LpStatusOptimal:
-            logger.error(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
-            raise ValueError(f"PuLP solver failed with status: {pulp.LpStatus[status]}")
-
-        for i in range(T):
-            start_hour = start_times[i].varValue
-            if start_hour is not None:
-                tasks[i].start_time = now + timedelta(hours=start_hour)
-            else:
-                logger.error(f"No start time assigned for task {tasks[i].id}")
-                raise ValueError(f"No start time assigned for task {tasks[i].id}")
-
-        makespan_value = makespan.varValue if makespan.varValue is not None else 0
-        throughput = T / makespan_value if makespan_value > 0 else 0
-        penalties_dict = {tasks[i].id: penalties[i].varValue for i in range(T) if penalties[i].varValue is not None}
-
-        logger.info(f"PuLP optimization completed: makespan={makespan_value}")
-        return {
-            'tasks': tasks,
-            'makespan': makespan_value,
-            'throughput': throughput,
-            'penalties': penalties_dict
-        }
+                dep_task = next((t for t in tasks if t.id == dep_id), None)
+                if dep_task:
+                    for t in range(len(time_slots) - task.duration + 1):
+                        for t_dep in range(t + 1):
+                            prob += x[task.id][t] <= 1 - x[dep_id][t_dep] + pulp.lpSum(
+                                x[dep_id][t_dep_end] for t_dep_end in range(t_dep - dep_task.duration + 1, t_dep + 1) 
+                                if t_dep_end >= 0 and t_dep_end < t - dep_task.duration
+                            )
+        
+        # Constraint: Deadlines
+        for task in tasks:
+            deadline_index = next((i for i, t in enumerate(time_slots) if t >= task.deadline), len(time_slots))
+            for t in range(deadline_index - task.duration + 1, len(time_slots) - task.duration + 1):
+                prob += x[task.id][t] == 0
+        
+        # Objective: Minimize weighted sum of completion times and resource costs
+        objective = pulp.lpSum(
+            task.priority * pulp.lpSum(
+                x[task.id][t] * (t + task.duration) for t in range(len(time_slots) - task.duration + 1)
+            ) for task in tasks
+        )
+        
+        # Add resource cost to objective
+        resource_cost = pulp.lpSum(
+            resource.cost * pulp.lpSum(
+                resource_usage[resource.id][t] for t in range(len(time_slots)) if resource.id in resource_usage
+            ) for resource in resources if resource.is_available
+        )
+        
+        prob += objective + resource_cost
+        
+        # Solve the problem with an increased timeout
+        solver = pulp.PULP_CBC_CMD(timeLimit=OPTIMIZATION_TIMEOUT)
+        
+        # Use a thread with timeout to solve the problem
+        def solve_with_timeout():
+            try:
+                prob.solve(solver)
+                return True
+            except Exception as e:
+                logger.error(f"Error in PuLP solver: {e}")
+                return False
+        
+        # Create and start the solver thread
+        solver_thread = threading.Thread(target=solve_with_timeout)
+        solver_thread.daemon = True
+        solver_thread.start()
+        
+        # Wait for the solver thread with a timeout
+        solver_thread.join(OPTIMIZATION_TIMEOUT + 5)  # Add 5 seconds buffer
+        
+        if solver_thread.is_alive():
+            # If the thread is still running after the timeout, we consider it as a timeout
+            logger.warning(f"PuLP optimization timed out after {OPTIMIZATION_TIMEOUT} seconds")
+            with results_lock:
+                optimization_results[result_id] = {
+                    'status': 'error',
+                    'error': f'Optimization timed out after {OPTIMIZATION_TIMEOUT} seconds'
+                }
+            return
+        
+        if prob.status != pulp.LpStatusOptimal:
+            logger.warning(f"PuLP optimization failed with status: {pulp.LpStatus[prob.status]}")
+            with results_lock:
+                optimization_results[result_id] = {
+                    'status': 'error',
+                    'error': f'Optimization failed: {pulp.LpStatus[prob.status]}'
+                }
+            return
+        
+        # Extract results
+        scheduled_tasks = []
+        for task in tasks:
+            start_slot = None
+            for t in range(len(time_slots) - task.duration + 1):
+                if pulp.value(x[task.id][t]) > 0.5:  # Binary variable is approximately 1
+                    start_slot = t
+                    break
+            
+            if start_slot is not None:
+                task.start_time = time_slots[start_slot]
+                scheduled_tasks.append(task)
+        
+        # Calculate makespan (time from now until the last task finishes)
+        makespan = 0
+        if scheduled_tasks:
+            latest_end_time = max(
+                (task.start_time + timedelta(hours=task.duration)) for task in scheduled_tasks
+            )
+            makespan = (latest_end_time - now).total_seconds() / 3600  # in hours
+        
+        # Calculate throughput (tasks per hour)
+        throughput = len(scheduled_tasks) / max(1, makespan)
+        
+        # Calculate penalties (tasks that miss their deadlines)
+        penalties = {}
+        for task in scheduled_tasks:
+            end_time = task.start_time + timedelta(hours=task.duration)
+            if end_time > task.deadline:
+                hours_late = (end_time - task.deadline).total_seconds() / 3600
+                penalties[task.id] = hours_late
+        
+        logger.info(f"PuLP optimization completed successfully for result_id: {result_id}")
+        with results_lock:
+            optimization_results[result_id] = {
+                'status': 'completed',
+                'tasks': [task.to_dict() for task in scheduled_tasks],
+                'makespan': makespan,
+                'throughput': throughput,
+                'penalties': penalties
+            }
+    
     except Exception as e:
         logger.error(f"Error in optimize_with_pulp: {e}")
-        raise
+        with results_lock:
+            optimization_results[result_id] = {
+                'status': 'error',
+                'error': str(e)
+            }
 
 # Simulated Annealing Optimization
 def optimize_with_simulated_annealing(tasks, resources):
