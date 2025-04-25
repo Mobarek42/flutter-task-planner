@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
@@ -39,10 +40,9 @@ def get_db():
 # Initialize database
 def init_db():
     with get_db() as conn:
-        # Drop the existing table to ensure a clean schema
-        conn.execute('DROP TABLE IF EXISTS tasks')
+        # Create the table only if it doesn't exist
         conn.execute('''
-            CREATE TABLE tasks (
+            CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -51,7 +51,7 @@ def init_db():
                 priority INTEGER NOT NULL,
                 dependencies TEXT,
                 resources TEXT,
-                startTime TEXT
+                start_time TEXT
             )
         ''')
         conn.execute('''
@@ -81,13 +81,13 @@ def migrate_db():
                 conn.commit()
             
             # Add missing columns if they don't exist
-            if 'startTime' not in columns:
+            if 'start_time' not in columns:
                 logger.info("Adding start_time column to tasks table")
-                conn.execute('ALTER TABLE tasks ADD COLUMN startTime TEXT')
+                conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
                 conn.commit()
-                logger.info("Migration completed: startTime column added to tasks")
+                logger.info("Migration completed: start_time column added to tasks")
             else:
-                logger.info("startTime column already exists in tasks table")
+                logger.info("start_time column already exists in tasks table")
 
             # Check and migrate resources table
             cursor = conn.execute('PRAGMA table_info(resources)')
@@ -101,11 +101,15 @@ def migrate_db():
                 logger.info("isAvailable column already exists in resources table")
         except sqlite3.Error as e:
             logger.error(f"Error during database migration: {e}")
-            raise
+            # If migration fails due to corruption, recreate the database
+            import os
+            os.remove('tasks.db')
+            logger.info("Database file removed due to corruption. Recreating database.")
+            init_db()
 
 # Task model
 class Task:
-    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, startTime=None):
+    def __init__(self, id, name, description, deadline, duration, priority, dependencies, resources, start_time=None):
         self.id = id
         self.name = name
         self.description = description
@@ -114,7 +118,7 @@ class Task:
         self.priority = priority
         self.dependencies = dependencies if dependencies else []
         self.resources = resources if resources else []
-        self.startTime = datetime.fromisoformat(startTime.replace('Z', '+00:00')) if startTime else None
+        self.start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00')) if start_time else None
 
     def to_dict(self):
         return {
@@ -126,7 +130,7 @@ class Task:
             'priority': self.priority,
             'dependencies': self.dependencies,
             'resources': self.resources,
-            'startTime': self.startTime.isoformat() if self.startTime else None
+            'startTime': self.start_time.isoformat() if self.start_time else None
         }
 
 # Resource model
@@ -158,7 +162,7 @@ def get_tasks():
             task_dict = dict(task)
             task_dict['dependencies'] = json.loads(task_dict['dependencies'] or '[]')
             task_dict['resources'] = json.loads(task_dict['resources'] or '[]')
-            task_dict['startTime'] = task_dict['startTime']
+            task_dict['startTime'] = task_dict['start_time']
             tasks_list.append(task_dict)
         return jsonify(tasks_list)
 
@@ -202,12 +206,12 @@ def create_task():
             return jsonify({'error': 'Invalid deadline format'}), 400
 
         # Validate startTime if provided
-        startTime = data.get('startTime')
-        if startTime:
+        start_time = data.get('startTime')
+        if start_time:
             try:
-                datetime.fromisoformat(startTime.replace('Z', '+00:00'))
+                datetime.fromisoformat(start_time.replace('Z', '+00:00'))
             except ValueError:
-                logger.error(f"Invalid startTime format: {startTime}")
+                logger.error(f"Invalid startTime format: {start_time}")
                 return jsonify({'error': 'Invalid startTime format'}), 400
 
         task = Task(
@@ -219,7 +223,7 @@ def create_task():
             priority=priority,
             dependencies=data.get('dependencies', []),
             resources=data.get('resources', []),
-            start_time=startTime
+            start_time=start_time
         )
 
         with get_db() as conn:
@@ -236,7 +240,7 @@ def create_task():
                     task.priority,
                     json.dumps(task.dependencies),
                     json.dumps(task.resources),
-                    task.startTime.isoformat() if task.startTime else None
+                    task.start_time.isoformat() if task.start_time else None
                 ))
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -299,7 +303,7 @@ def create_resource():
         # Flexible validation for cost
         try:
             cost = float(data['cost'])
-            if cost < 0:
+            if.NativeElement cost < 0:
                 logger.error(f"Invalid cost: {cost}")
                 return jsonify({'error': 'Cost must be non-negative'}), 400
         except (ValueError, TypeError):
@@ -380,7 +384,7 @@ def optimize():
                     priority=t['priority'],
                     dependencies=t.get('dependencies', []),
                     resources=t.get('resources', []),
-                    startTime=t.get('startTime')
+                    start_time=t.get('startTime')
                 )
                 if task.duration <= 0:
                     raise ValueError(f"Invalid duration for task {task.id}: {task.duration}")
@@ -607,8 +611,8 @@ def optimize_with_simulated_annealing(tasks, resources):
         now = datetime.now()
 
         for i, task in enumerate(tasks):
-            startTime = schedule[i]
-            end_time = startTime + task.duration
+            start_time = schedule[i]
+            end_time = start_time + task.duration
             deadline_hours = (task.deadline - now).total_seconds() / 3600
             penalty = max(0, end_time - deadline_hours) * task.priority * 100
             penalties[task.id] = penalty
@@ -700,8 +704,8 @@ def optimize_with_simulated_annealing(tasks, resources):
             raise ValueError("Final schedule violates dependencies")
         now = datetime.now()
         for i, task in enumerate(tasks):
-            startTime = schedule[i]
-            end_time = startTime + task.duration
+            start_time = schedule[i]
+            end_time = start_time + task.duration
             deadline_hours = (task.deadline - now).total_seconds() / 3600
             if end_time > deadline_hours:
                 logger.warning(f"Task {task.id} misses deadline: end={end_time}, deadline={deadline_hours}")
@@ -771,7 +775,7 @@ def optimize_with_simulated_annealing(tasks, resources):
             start_hours = best_schedule[i]
             task.start_time = now + timedelta(hours=start_hours)
 
-        throughput = len(tasks) / best_makespan if best_makespan > 0 else 0
+        throughput = len(tasks) / best_makespan if best_makespanć > 0 else 0
         logger.info(f"Simulated Annealing completed: makespan={best_makespan}, throughput={throughput}, iterations={total_iterations}")
 
         return {
@@ -787,4 +791,5 @@ def optimize_with_simulated_annealing(tasks, resources):
 if __name__ == '__main__':
     init_db()
     migrate_db()
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    port = int(os.getenv("PORT", 3000))
+    app.run(host='0.0.0.0', port=port, debug=True)
