@@ -422,46 +422,54 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // Update an existing task
-Future<void> _updateTask(Task task) async {
-  if (!_validateTask(task, _tasks)) {
-    return;
-  }
-  setState(() => _isLoading = true);
-  try {
+  Future<void> _updateTask(Task task) async {
+    if (!_validateTask(task, _tasks)) {
+      return;
+    
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
     // Mettre à jour la tâche localement avant les opérations serveur
-    setState(() {
-      final index = _tasks.indexWhere((t) => t.id == task.id);
-      if (index != -1) {
-        _tasks[index] = task;
-        _applyFilters();
-      }
-    });
+      setState(() {
+
+        final index = _tasks.indexWhere((t) => t.id == task.id);
+
+        if (index != -1) {
+          _tasks[index] = task;
+          _applyFilters();
+        }
+      });
     
     // Ensuite, effectuer les opérations serveur
-    await http.delete(Uri.parse('$_baseUrl/tasks/${task.id}') );
-    final response = await http.post(
-      Uri.parse('$_baseUrl/tasks') ,
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode(task.toJson()),
-    );
+      await http.delete(Uri.parse('$_baseUrl/tasks/${task.id}') );
+      final response = await http.post(
+        Uri.parse('$_baseUrl/tasks') ,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(task.toJson()),
+      );
     
-    if (response.statusCode == 201) {
+      if (response.statusCode == 201) {
       // Mettre à jour avec les données du serveur
-      await _fetchTasks();
-      _showSuccess('Task updated successfully');
-    } else {
-      _showError('Error updating task: ${response.statusCode}');
+        await _fetchTasks();
+        _showSuccess('Task updated successfully');
+      } else {
+        _showError('Error updating task: ${response.statusCode}');
       // En cas d'erreur, recharger les tâches pour revenir à l'état précédent
-      await _fetchTasks();
-    }
-  } catch (e) {
-    _showError('Error updating task: $e');
+        await _fetchTasks();
+
+      }
+      
+    } catch (e) {
+      _showError('Error updating task: $e');
     // En cas d'erreur, recharger les tâches pour revenir à l'état précédent
-    await _fetchTasks();
-  } finally {
-    setState(() => _isLoading = false);
+      await _fetchTasks();
+    } finally {
+
+      setState(() => _isLoading = false);
+    }
   }
-}
 
 
   // Update an existing resource
