@@ -422,7 +422,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // Update an existing task
-  // Update an existing task - CORRIGÉ
 Future<void> _updateTask(Task task) async {
   if (!_validateTask(task, _tasks)) {
     return;
@@ -439,9 +438,9 @@ Future<void> _updateTask(Task task) async {
     });
     
     // Ensuite, effectuer les opérations serveur
-    await http.delete(Uri.parse('$_baseUrl/tasks/${task.id}'));
+    await http.delete(Uri.parse('$_baseUrl/tasks/${task.id}') );
     final response = await http.post(
-      Uri.parse('$_baseUrl/tasks'),
+      Uri.parse('$_baseUrl/tasks') ,
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(task.toJson()),
     );
