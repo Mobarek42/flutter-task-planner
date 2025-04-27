@@ -3,7 +3,7 @@ import datetime
 import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus
+from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
 import random
 import math
 import threading
@@ -232,7 +232,7 @@ def optimize_schedule_async():
     result_id = str(uuid.uuid4())
     results[result_id] = {"status": "pending"}
 
-    def optimize_schedule():
+    def optimize_schedule(tasks, resources, method, params, result_id):
         try:
             now = datetime.datetime.now()
             fixed_tasks = [t for t in tasks if 'startTime' in t and t['startTime']]
@@ -295,9 +295,7 @@ def optimize_schedule_async():
                 prob.solve()
                 if LpStatus[prob.status] == 'Optimal':
                     print("Optimal solution found with PuLP")
-                    for task in tasks_to_optimize:
-                        start_time = now + datetime.timedelta(hours=value(start_times[task['id']]))
-                        task['startTime'] = start_time.isoformat()
+                    optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize}
                     
                     makespan_val = value(makespan)
                     throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
@@ -315,30 +313,39 @@ def optimize_schedule_async():
                         "resource_conflicts": 0.0
                     }
                     
+                    # Update tasks with start times
+                    final_tasks = []
                     for task in tasks:
-                        if 'startTime' in task and task['startTime']:
-                            start_str = task['startTime'].replace('Z', '')
-                            if '+' in start_str:
-                                start_str = start_str.split('+')[0]
-                            start = datetime.datetime.fromisoformat(start_str)
-                            end = start + datetime.timedelta(hours=task['duration'])
+                        if task['id'] in optimized_start_times:
+                            start_hour = optimized_start_times[task['id']]
+                            start_time = now + datetime.timedelta(hours=start_hour)
+                            task['startTime'] = start_time.isoformat()
+                            end = start_time + datetime.timedelta(hours=task['duration'])
                             deadline_str = task['deadline'].replace('Z', '')
                             if '+' in deadline_str:
                                 deadline_str = deadline_str.split('+')[0]
                             deadline = datetime.datetime.fromisoformat(deadline_str)
                             if end > deadline:
                                 penalties["deadline_violations"] += (end - deadline).total_seconds() / 3600
+                        final_tasks.append(task)
                     
                     # Calculate resource utilization
                     resource_utilization = {}
                     for res_id in set(res_id for task in tasks for res_id in task.get('resources', [])):
                         total_time = 0
-                        for task in tasks:
+                        for task in final_tasks:
                             if res_id in task.get('resources', []) and 'startTime' in task and task['startTime']:
                                 total_time += task['duration']
                         resource_utilization[res_id] = total_time / makespan_val if makespan_val > 0 else 0
                     
                     metrics["resource_utilization"] = resource_utilization
+                    metrics["penalties"] = penalties
+                    
+                    results[result_id] = {
+                        "status": "completed",
+                        "tasks": final_tasks,
+                        "metrics": metrics
+                    }
                 else:
                     results[result_id] = {
                         "status": "failed",
@@ -351,18 +358,17 @@ def optimize_schedule_async():
                     'initial_temp': params.get('initial_temp', 1000.0),
                     'cooling_rate': params.get('cooling_rate', 0.95),
                     'max_iterations': params.get('max_iterations', 10000),
-                    'no_improvement_limit': params.get('no_improvement_limit', 1000),
+                    'no_improvement_limit': params.get('no_improvement_limit', 1000)
                 }
+                initial_solution = get_initial_solution(tasks, resources)
+                best_solution, best_cost, iterations, final_temp = simulated_annealing(
+                    tasks, resources, initial_solution=initial_solution, params=sa_params
+                )
                 
-                solution, makespan_val, iterations, final_temp = simulated_annealing(tasks, resources, params=sa_params)
-                
-                for task in tasks_to_optimize:
-                    start_time = now + datetime.timedelta(hours=solution[task['id']])
-                    task['startTime'] = start_time.isoformat()
-                
+                makespan_val = best_cost
                 throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
                 
-                # Calculate metrics
+                # Calculate additional metrics
                 metrics = {
                     "makespan": makespan_val,
                     "throughput": throughput,
@@ -371,157 +377,62 @@ def optimize_schedule_async():
                 }
                 
                 # Calculate penalties
-                penalties = {"deadline_violations": 0.0, "dependency_violations": 0.0, "resource_conflicts": 0.0}
+                penalties = {
+                    "deadline_violations": 0.0,
+                    "dependency_violations": 0.0,
+                    "resource_conflicts": 0.0
+                }
                 
+                # Update tasks with start times
+                final_tasks = []
                 for task in tasks:
-                    if 'startTime' in task and task['startTime']:
-                        start_str = task['startTime'].replace('Z', '')
-                        if '+' in start_str:
-                            start_str = start_str.split('+')[0]
-                        start = datetime.datetime.fromisoformat(start_str)
-                        end = start + datetime.timedelta(hours=task['duration'])
+                    if task['id'] in best_solution:
+                        start_hour = best_solution[task['id']]
+                        start_time = now + datetime.timedelta(hours=start_hour)
+                        task['startTime'] = start_time.isoformat()
+                        end = start_time + datetime.timedelta(hours=task['duration'])
                         deadline_str = task['deadline'].replace('Z', '')
                         if '+' in deadline_str:
                             deadline_str = deadline_str.split('+')[0]
                         deadline = datetime.datetime.fromisoformat(deadline_str)
                         if end > deadline:
                             penalties["deadline_violations"] += (end - deadline).total_seconds() / 3600
-
-            with sqlite3.connect(DATABASE) as conn:
-                for task in tasks:
-                    conn.execute('UPDATE tasks SET start_time = ? WHERE id = ?', (task['startTime'], task['id']))
-
-            results[result_id] = {
-                "status": "completed",
-                "makespan": makespan_val,
-                "throughput": throughput,
-                "tasks": tasks,
-                "penalties": penalties,
-                "metrics": metrics
-            }
+                    final_tasks.append(task)
+                
+                # Calculate resource utilization
+                resource_utilization = {}
+                for res_id in set(res_id for task in tasks for res_id in task.get('resources', [])):
+                    total_time = 0
+                    for task in final_tasks:
+                        if res_id in task.get('resources', []) and 'startTime' in task and task['startTime']:
+                            total_time += task['duration']
+                    resource_utilization[res_id] = total_time / makespan_val if makespan_val > 0 else 0
+                
+                metrics["resource_utilization"] = resource_utilization
+                metrics["penalties"] = penalties
+                
+                results[result_id] = {
+                    "status": "completed",
+                    "tasks": final_tasks,
+                    "metrics": metrics
+                }
+            else:
+                results[result_id] = {"status": "failed", "error": "Invalid optimization method"}
         except Exception as e:
-            print(f"Error in optimize_schedule: {e}")
-            results[result_id] = {
-                "status": "failed",
-                "error": str(e)
-            }
+            results[result_id] = {"status": "failed", "error": str(e)}
+            print(f"Optimization failed for {result_id}: {e}")
 
-    threading.Thread(target=optimize_schedule).start()
-    return jsonify({"status": "pending", "id": result_id})
+    thread = threading.Thread(target=optimize_schedule, args=(tasks, resources, method, params, result_id))
+    thread.start()
+
+    # Return 202 Accepted status code for asynchronous operation
+    return jsonify({"status": "pending", "id": result_id}), 202
 
 @app.route('/result/<result_id>', methods=['GET'])
 def get_result(result_id):
-    if result_id in results:
-        return jsonify(results[result_id])
-    return jsonify({"error": "Result not found"}), 404
-
-@app.route('/tasks/filter', methods=['POST'])
-def filter_tasks():
-    """
-    Filter tasks based on specified criteria.
-    
-    Filtering criteria:
-    - search: Text search in name and description
-    - priority: Filter by priority
-    - resource: Filter by assigned resource
-    - completed: Filter by status (scheduled/unscheduled)
-    """
-    filters = request.get_json()
-    search = filters.get('search', '').lower()
-    priority = filters.get('priority')
-    resource = filters.get('resource')
-    completed = filters.get('completed')
-    
-    with sqlite3.connect(DATABASE) as conn:
-        conn.row_factory = sqlite3.Row
-        tasks = conn.execute('SELECT * FROM tasks').fetchall()
-    
-    # Convert results to list of dictionaries
-    task_list = [{
-        **dict(task),
-        'dependencies': task['dependencies'].split(',') if task['dependencies'] else [],
-        'resources': json.loads(task['resources']) if task['resources'] else []
-    } for task in tasks]
-    
-    # Apply filters
-    filtered_tasks = []
-    for task in task_list:
-        matches_search = search == '' or search in task['name'].lower() or search in task['description'].lower()
-        matches_priority = priority is None or task['priority'] == priority
-        matches_resource = resource is None or resource in task['resources']
-        matches_completed = completed is None or (completed and task['start_time'] is not None) or (not completed and task['start_time'] is None)
-        
-        if matches_search and matches_priority and matches_resource and matches_completed:
-            filtered_tasks.append(task)
-    
-    return jsonify(filtered_tasks)
-
-@app.route('/metrics', methods=['GET'])
-def get_metrics():
-    """
-    Calculate and return metrics on tasks and resources.
-    
-    Metrics:
-    - Total number of tasks
-    - Number of scheduled tasks
-    - Average task duration
-    - Resource utilization
-    - Priority distribution
-    """
-    with sqlite3.connect(DATABASE) as conn:
-        conn.row_factory = sqlite3.Row
-        tasks = conn.execute('SELECT * FROM tasks').fetchall()
-        resources = conn.execute('SELECT * FROM resources').fetchall()
-    
-    # Convert results to lists of dictionaries
-    task_list = [{
-        **dict(task),
-        'dependencies': task['dependencies'].split(',') if task['dependencies'] else [],
-        'resources': json.loads(task['resources']) if task['resources'] else []
-    } for task in tasks]
-    
-    resource_list = [dict(resource) for resource in resources]
-    
-    # Calculate metrics
-    total_tasks = len(task_list)
-    planned_tasks = sum(1 for task in task_list if task['start_time'] is not None)
-    
-    # Average duration
-    avg_duration = 0
-    if total_tasks > 0:
-        avg_duration = sum(task['duration'] for task in task_list) / total_tasks
-    
-    # Priority distribution
-    priority_distribution = {
-        '1': sum(1 for task in task_list if task['priority'] == 1),
-        '2': sum(1 for task in task_list if task['priority'] == 2),
-        '3': sum(1 for task in task_list if task['priority'] == 3),
-    }
-    
-    # Resource usage
-    resource_usage = {}
-    for resource in resource_list:
-        resource_id = resource['id']
-        resource_usage[resource_id] = {
-            'name': resource['name'],
-            'type': resource['type'],
-            'task_count': sum(1 for task in task_list if resource_id in task['resources']),
-            'total_hours': sum(task['duration'] for task in task_list if resource_id in task['resources']),
-        }
-    
-    metrics = {
-        'total_tasks': total_tasks,
-        'planned_tasks': planned_tasks,
-        'avg_duration': avg_duration,
-        'priority_distribution': priority_distribution,
-        'resource_usage': resource_usage,
-    }
-    
-    return jsonify(metrics)
-
-def value(x):
-    from pulp import value as pulp_value
-    return pulp_value(x)
+    result = results.get(result_id, {"status": "not_found"})
+    return jsonify(result)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
