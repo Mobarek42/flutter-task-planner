@@ -4,6 +4,7 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
+import pulp # <-- Added this import
 import random
 import math
 import threading
@@ -309,7 +310,7 @@ def optimize_schedule_async():
                         # Handle invalid start time
 
             if method == 'PuLP':
-                # --- PuLP Optimization Logic --- (Keep as is) --- 
+                # --- PuLP Optimization Logic --- 
                 prob = LpProblem("Task_Scheduling", LpMinimize)
                 start_times = {task['id']: LpVariable(f"start_{task['id']}", 0) for task in tasks if 'startTime' not in task or not task['startTime']}
                 makespan = LpVariable("makespan", 0)
@@ -366,6 +367,7 @@ def optimize_schedule_async():
 
                 # Set a time limit for the solver
                 time_limit = params.get('pulp_time_limit', 30) # Default 30 seconds
+                # Use the imported pulp module directly
                 prob.solve(pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=1))
 
                 if LpStatus[prob.status] == 'Optimal' or LpStatus[prob.status] == 'Feasible': # Accept feasible if optimal not found in time
