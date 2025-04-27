@@ -4,7 +4,7 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
-import pulp # <-- Added this import
+# import pulp # Ensure pulp is imported if using pulp.PULP_CBC_CMD
 import random
 import math
 import threading
@@ -86,20 +86,17 @@ def delete_resource(resource_id):
 def get_initial_solution(tasks, resources):
     now = datetime.datetime.now()
     start_times = {}
+    task_map = {t['id']: t for t in tasks}
     
-    # Sort tasks topologically if possible, otherwise by priority/deadline
-    # Basic priority/deadline sort for now
+    # Sort tasks by priority and deadline
     sorted_tasks = sorted(tasks, key=lambda t: (
         -t.get('priority', 0),
         datetime.datetime.fromisoformat(t['deadline'].replace('Z', '+00:00'))
     ))
     
-    task_map = {t['id']: t for t in tasks}
-
     for task in sorted_tasks:
         task_id = task['id']
         if 'startTime' in task and task['startTime']:
-            # Use fixed start time if provided
             start_times[task_id] = (datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00')) - now).total_seconds() / 3600
         else:
             earliest_start = 0
@@ -116,14 +113,14 @@ def get_initial_solution(tasks, resources):
             # Simple resource conflict avoidance (greedy)
             task_resources = task.get('resources', [])
             current_time = earliest_start
-            resource_available_time = {res_id: 0 for res_id in task_resources}
-
             conflict = True
-            while conflict:
+            max_attempts = len(tasks) * len(resources) + 1 # Limit attempts to avoid infinite loops
+            attempts = 0
+            while conflict and attempts < max_attempts:
+                attempts += 1
                 conflict = False
                 max_resource_end_time = current_time # Time when all needed resources are free
                 for res_id in task_resources:
-                    # Find the latest end time of tasks using this resource before current_time + duration
                     latest_end_time_for_res = 0
                     for other_task_id, other_start_time in start_times.items():
                         other_task = task_map.get(other_task_id)
@@ -141,9 +138,16 @@ def get_initial_solution(tasks, resources):
                     current_time = max_resource_end_time # Try starting after the conflict
                 else:
                     earliest_start = current_time # Found a conflict-free start time
+            
+            if attempts >= max_attempts:
+                 logger.warning(f"Could not resolve resource conflict for task {task_id} in initial solution after {attempts} attempts.")
+                 # Assign earliest possible time despite conflict, SA might resolve it
+                 earliest_start = current_time 
 
             start_times[task_id] = earliest_start
     
+    # Final dependency check on initial solution
+    repair_solution(start_times, tasks)
     return start_times
 
 def evaluate_solution(start_times, tasks, resources):
@@ -153,44 +157,62 @@ def evaluate_solution(start_times, tasks, resources):
         task_id = task['id']
         if task_id in start_times:
             start = start_times[task_id]
-            end = start + task['duration']
+            # Ensure duration is treated as a number
+            duration = task.get('duration', 0)
+            if not isinstance(duration, (int, float)):
+                try:
+                    duration = float(duration)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid duration for task {task_id}: {duration}. Using 0.")
+                    duration = 0
+            end = start + duration
             makespan = max(makespan, end)
     return makespan
 
 def repair_solution(solution, tasks):
-    """Repair a solution to respect dependency constraints. Needs careful handling for cycles or complex dependencies."""
-    # Simple single-pass repair. Might need multiple passes for complex dependencies.
+    """Repair a solution to respect dependency constraints iteratively."""
     task_map = {t['id']: t for t in tasks}
     changed = True
     passes = 0
-    max_passes = len(tasks) # Limit passes to avoid infinite loops in case of cycles
+    max_passes = len(tasks) + 1 # Limit passes to avoid infinite loops
+
     while changed and passes < max_passes:
         changed = False
         passes += 1
-        # Process tasks, potentially in a specific order (e.g., topological sort if DAG)
-        # For simplicity, iterating through the list
+        # Iterate through tasks (order might matter, but simple iteration often works)
         for task in tasks:
             task_id = task['id']
             if task_id in solution:
                 min_start_due_to_deps = 0
-                for dep_id in task.get('dependencies', []):
+                dependencies = task.get('dependencies', [])
+                for dep_id in dependencies:
                     if dep_id and dep_id in solution:
                         dep_task = task_map.get(dep_id)
                         if dep_task:
-                            dep_end_time = solution[dep_id] + dep_task['duration']
+                            # Ensure duration is treated as a number
+                            dep_duration = dep_task.get('duration', 0)
+                            if not isinstance(dep_duration, (int, float)):
+                                try:
+                                    dep_duration = float(dep_duration)
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Invalid duration for dependency task {dep_id}: {dep_duration}. Using 0.")
+                                    dep_duration = 0
+                            dep_end_time = solution[dep_id] + dep_duration
                             min_start_due_to_deps = max(min_start_due_to_deps, dep_end_time)
                 
-                # Ensure start time respects dependencies
-                if solution[task_id] < min_start_due_to_deps:
-                    solution[task_id] = min_start_due_to_deps
-                    changed = True
-        # Consider adding resource conflict repair here as well if needed
+                # Ensure start time respects dependencies and is non-negative
+                required_start_time = max(0, min_start_due_to_deps)
+                if solution[task_id] < required_start_time:
+                    solution[task_id] = required_start_time
+                    changed = True # Mark that a change was made in this pass
+    
+    if passes >= max_passes and changed:
+        logger.warning("Repair solution reached max passes, potential dependency cycle or complex issue.")
 
 def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     """
     Optimize the schedule using simulated annealing.
-    Ensures dependency constraints (task starts after dependency ends) are met.
-    Resource constraints are handled greedily in initial solution and potentially during repair.
+    Minimal fix: Ensures dependency constraints are checked iteratively after perturbation.
     """
     params = params or {}
     initial_temp = params.get('initial_temp', 1000.0)
@@ -199,7 +221,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     no_improvement_limit = params.get('no_improvement_limit', 1000)
     
     current_solution = initial_solution or get_initial_solution(tasks, resources)
-    # Ensure initial solution is valid regarding dependencies
+    # Ensure initial solution is valid
     repair_solution(current_solution, tasks)
     current_cost = evaluate_solution(current_solution, tasks, resources)
     best_solution = current_solution.copy()
@@ -221,34 +243,17 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         
         # Select a task to modify
         task_id = random.choice(tasks_to_optimize_ids)
-        task_to_move = task_map[task_id]
         
         # Apply perturbation (shift start time)
-        # Calculate valid range based on dependencies
-        min_start_time = 0
-        for dep_id in task_to_move.get('dependencies', []):
-            if dep_id and dep_id in new_solution:
-                dep_task = task_map.get(dep_id)
-                if dep_task:
-                    min_start_time = max(min_start_time, new_solution[dep_id] + dep_task['duration'])
-        
-        # Consider a perturbation range, but ensure it respects min_start_time
-        perturbation = random.uniform(-temp / 100, temp / 100) # Smaller perturbation
+        perturbation = random.uniform(-temp / 100, temp / 100) # Smaller perturbation range
         proposed_start_time = new_solution[task_id] + perturbation
         
-        # Ensure the new start time is valid (non-negative and respects immediate dependencies)
-        new_start_time = max(min_start_time, proposed_start_time, 0)
+        # Ensure the new start time is non-negative
+        new_solution[task_id] = max(0, proposed_start_time)
         
-        if new_start_time != new_solution[task_id]:
-            new_solution[task_id] = new_start_time
-            # After moving a task, we MUST repair dependencies for tasks that depend on it
-            # and potentially resource conflicts caused by the move.
-            repair_solution(new_solution, tasks) # Repair dependencies iteratively
-            # Add resource conflict repair here if necessary
-        else:
-            # If the move wasn't significant or valid, maybe skip or try another task
-            iteration += 1
-            continue
+        # *** Minimal Fix: Call iterative repair_solution AFTER perturbation ***
+        repair_solution(new_solution, tasks)
+        # *******************************************************************
 
         # Evaluate new solution
         new_cost = evaluate_solution(new_solution, tasks, resources)
@@ -261,7 +266,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
             if new_cost < best_cost:
                 best_solution = new_solution.copy()
                 best_cost = new_cost
-                logger.debug(f"SA New best cost: {best_cost} at iter {iteration}")
+                # logger.debug(f"SA New best cost: {best_cost} at iter {iteration}") # Optional debug log
                 no_improvement = 0
             else:
                 no_improvement += 1
@@ -272,10 +277,16 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         temp *= cooling_rate
         iteration += 1
         
-        if iteration % 100 == 0:
-             logger.debug(f"SA Iter: {iteration}, Temp: {temp:.2f}, Cost: {current_cost:.2f}, Best: {best_cost:.2f}")
+        # Optional progress log
+        # if iteration % 500 == 0:
+        #      logger.debug(f"SA Iter: {iteration}, Temp: {temp:.2f}, Cost: {current_cost:.2f}, Best: {best_cost:.2f}")
 
     logger.info(f"SA finished. Iter: {iteration}, Temp: {temp:.2f}, Best Cost: {best_cost:.2f}")
+    # Final repair on the best solution found
+    repair_solution(best_solution, tasks)
+    best_cost = evaluate_solution(best_solution, tasks, resources) # Re-evaluate after final repair
+    logger.info(f"SA final repaired Best Cost: {best_cost:.2f}")
+
     return best_solution, best_cost, iteration, temp
 
 results = {}
@@ -293,24 +304,33 @@ def optimize_schedule_async():
     def optimize_schedule(tasks, resources, method, params, result_id):
         try:
             now = datetime.datetime.now()
-            # Convert deadline strings to datetime objects for internal use if needed
+            # Convert deadline/startTime strings to datetime objects for internal use if needed
             for task in tasks:
                 if isinstance(task.get('deadline'), str):
                     try:
                         task['deadline_dt'] = datetime.datetime.fromisoformat(task['deadline'].replace('Z', '+00:00'))
                     except ValueError:
                         logger.warning(f"Invalid deadline format for task {task['id']}: {task['deadline']}")
-                        # Handle invalid deadline, e.g., set a default or raise error
-                        task['deadline_dt'] = now + datetime.timedelta(days=365) # Default to 1 year
+                        task['deadline_dt'] = now + datetime.timedelta(days=365) # Default
                 if isinstance(task.get('startTime'), str):
                      try:
                         task['startTime_dt'] = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
                      except ValueError:
                         logger.warning(f"Invalid startTime format for task {task['id']}: {task['startTime']}")
-                        # Handle invalid start time
+                        # Handle invalid start time - perhaps remove it?
+                        task.pop('startTime', None)
+                        task.pop('startTime_dt', None)
 
             if method == 'PuLP':
                 # --- PuLP Optimization Logic --- 
+                # Assuming pulp is correctly installed and potentially imported as needed
+                try:
+                    import pulp 
+                except ImportError:
+                     logger.error("PuLP library not found. Please install it: pip install pulp")
+                     results[result_id] = {"status": "failed", "error": "PuLP library not installed"}
+                     return
+                     
                 prob = LpProblem("Task_Scheduling", LpMinimize)
                 start_times = {task['id']: LpVariable(f"start_{task['id']}", 0) for task in tasks if 'startTime' not in task or not task['startTime']}
                 makespan = LpVariable("makespan", 0)
@@ -329,13 +349,11 @@ def optimize_schedule_async():
                             dep_task = task_map.get(dep_id)
                             if dep_task:
                                 if 'startTime' in dep_task and dep_task['startTime']:
-                                    # Dependency is a fixed task
                                     dep_start_dt = dep_task['startTime_dt']
                                     dep_end_hours = (dep_start_dt - now).total_seconds() / 3600 + dep_task['duration']
                                     prob += start_times[task['id']] >= dep_end_hours
-                                elif dep_id in start_times: # Dependency is also being optimized
+                                elif dep_id in start_times:
                                     prob += start_times[task['id']] >= start_times[dep_id] + dep_task['duration']
-                                # else: dependency is not in the list? log warning?
 
                 # Resource constraints
                 resource_usage = {}
@@ -348,10 +366,9 @@ def optimize_schedule_async():
                     for i in range(len(res_tasks)):
                         for j in range(i + 1, len(res_tasks)):
                             t1, t2 = res_tasks[i], res_tasks[j]
-                            # Ensure t1 and t2 are in start_times (i.e., not fixed)
                             if t1['id'] in start_times and t2['id'] in start_times:
                                 b = LpVariable(f"b_{t1['id']}_{t2['id']}", cat='Binary')
-                                M = sum(t['duration'] for t in tasks) # A large number
+                                M = sum(t['duration'] for t in tasks) + 1 # A large number
                                 prob += start_times[t1['id']] + t1['duration'] <= start_times[t2['id']] + M * (1 - b)
                                 prob += start_times[t2['id']] + t2['duration'] <= start_times[t1['id']] + M * b
 
@@ -367,15 +384,16 @@ def optimize_schedule_async():
 
                 # Set a time limit for the solver
                 time_limit = params.get('pulp_time_limit', 30) # Default 30 seconds
-                # Use the imported pulp module directly
-                prob.solve(pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=1))
+                solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=1)
+                prob.solve(solver)
 
-                if LpStatus[prob.status] == 'Optimal' or LpStatus[prob.status] == 'Feasible': # Accept feasible if optimal not found in time
+                if LpStatus[prob.status] == 'Optimal' or LpStatus[prob.status] == 'Feasible':
                     status_msg = "Optimal" if LpStatus[prob.status] == 'Optimal' else "Feasible"
                     logger.info(f"{status_msg} solution found with PuLP for result_id {result_id}")
-                    optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize if task['id'] in start_times}
+                    optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize if task['id'] in start_times and start_times[task['id']].varValue is not None}
                     
-                    makespan_val = value(makespan)
+                    # Check if makespan has a value
+                    makespan_val = value(makespan) if makespan.varValue is not None else evaluate_solution(optimized_start_times, tasks, resources)
                     throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
                     logger.info(f"Calculated makespan: {makespan_val}, throughput: {throughput} for result_id {result_id}")
                     
@@ -384,7 +402,7 @@ def optimize_schedule_async():
                     
                     final_tasks = []
                     for task in tasks:
-                        task_copy = task.copy() # Avoid modifying original task data
+                        task_copy = task.copy()
                         if task_copy['id'] in optimized_start_times:
                             start_hour = optimized_start_times[task_copy['id']]
                             start_time = now + datetime.timedelta(hours=start_hour)
@@ -392,18 +410,15 @@ def optimize_schedule_async():
                             end_time = start_time + datetime.timedelta(hours=task_copy['duration'])
                             if 'deadline_dt' in task_copy and end_time > task_copy['deadline_dt']:
                                 penalties["deadline_violations"] += (end_time - task_copy['deadline_dt']).total_seconds() / 3600
-                        # Remove temporary datetime objects before storing/returning
                         task_copy.pop('deadline_dt', None)
                         task_copy.pop('startTime_dt', None)
                         final_tasks.append(task_copy)
                     
-                    # Calculate resource utilization (optional, can be complex)
-                    # ... (add calculation if needed) ...
                     metrics["resource_utilization"] = {} # Placeholder
                     metrics["penalties"] = penalties
                     
                     results[result_id] = {"status": "completed", "tasks": final_tasks, "metrics": metrics}
-                    logger.info(f"Stored result for {result_id}: {results[result_id]}")
+                    logger.info(f"Stored result for {result_id}")
                 else:
                     logger.error(f"PuLP failed for result_id {result_id} (status: {LpStatus[prob.status]})")
                     results[result_id] = {"status": "failed", "error": f"PuLP failed (status: {LpStatus[prob.status]})"}
@@ -445,18 +460,15 @@ def optimize_schedule_async():
                         end_time = start_time + datetime.timedelta(hours=task_copy['duration'])
                         if 'deadline_dt' in task_copy and end_time > task_copy['deadline_dt']:
                             penalties["deadline_violations"] += (end_time - task_copy['deadline_dt']).total_seconds() / 3600
-                    # Remove temporary datetime objects
                     task_copy.pop('deadline_dt', None)
                     task_copy.pop('startTime_dt', None)
                     final_tasks.append(task_copy)
                 
-                # Calculate resource utilization (optional)
-                # ... (add calculation if needed) ...
                 metrics["resource_utilization"] = {} # Placeholder
                 metrics["penalties"] = penalties
                 
                 results[result_id] = {"status": "completed", "tasks": final_tasks, "metrics": metrics}
-                logger.info(f"Stored result for {result_id}: {results[result_id]}")
+                logger.info(f"Stored result for {result_id}")
             else:
                 logger.error(f"Invalid optimization method '{method}' for result_id {result_id}")
                 results[result_id] = {"status": "failed", "error": "Invalid optimization method"}
@@ -473,30 +485,21 @@ def optimize_schedule_async():
 @app.route('/result/<result_id>', methods=['GET'])
 def get_result(result_id):
     result = results.get(result_id, {"status": "not_found"})
-    # logger.info(f"Fetching result for {result_id}: {result}") # Can be verbose
     
-    # Restructure the response if completed to match client expectations
     if result.get("status") == "completed":
         metrics = result.get("metrics", {})
-        # Create a new dictionary with metrics at the top level
         response_data = {
             "status": "completed",
             "tasks": result.get("tasks", []),
             "makespan": metrics.get("makespan"),
             "throughput": metrics.get("throughput"),
-            "metrics": metrics # Keep original nested metrics as well
+            "metrics": metrics 
         }
-        # logger.info(f"Returning restructured result for {result_id}: {response_data}")
         return jsonify(response_data)
     else:
-        # Return the original result for pending, failed, or not_found statuses
-        # logger.info(f"Returning original result for {result_id}: {result}")
         return jsonify(result)
 
 if __name__ == '__main__':
     # Make sure to install necessary packages: pip install Flask Flask-Cors pulp
-    # Example usage: Send POST to /optimize with JSON body like:
-    # { "tasks": [...], "resources": [...], "method": "SimulatedAnnealing" / "PuLP" }
-    # Then poll GET /result/<result_id>
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=3000, debug=True)
 
