@@ -4,7 +4,6 @@ import json
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, value
-# import pulp # Ensure pulp is imported if using pulp.PULP_CBC_CMD
 import random
 import math
 import threading
@@ -86,7 +85,6 @@ def delete_resource(resource_id):
 def get_initial_solution(tasks, resources):
     now = datetime.datetime.now()
     start_times = {}
-    task_map = {t['id']: t for t in tasks}
     
     # Sort tasks by priority and deadline
     sorted_tasks = sorted(tasks, key=lambda t: (
@@ -95,9 +93,8 @@ def get_initial_solution(tasks, resources):
     ))
     
     for task in sorted_tasks:
-        task_id = task['id']
         if 'startTime' in task and task['startTime']:
-            start_times[task_id] = (datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00')) - now).total_seconds() / 3600
+            start_times[task['id']] = (datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00')) - now).total_seconds() / 3600
         else:
             earliest_start = 0
             
@@ -105,49 +102,23 @@ def get_initial_solution(tasks, resources):
             dependencies = task.get('dependencies', [])
             for dep_id in dependencies:
                 if dep_id and dep_id in start_times:
-                    dep_task = task_map.get(dep_id)
+                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
                     if dep_task:
                         dep_end = start_times[dep_id] + dep_task['duration']
                         earliest_start = max(earliest_start, dep_end)
             
-            # Simple resource conflict avoidance (greedy)
+            # Avoid resource conflicts
             task_resources = task.get('resources', [])
-            current_time = earliest_start
-            conflict = True
-            max_attempts = len(tasks) * len(resources) + 1 # Limit attempts to avoid infinite loops
-            attempts = 0
-            while conflict and attempts < max_attempts:
-                attempts += 1
-                conflict = False
-                max_resource_end_time = current_time # Time when all needed resources are free
-                for res_id in task_resources:
-                    latest_end_time_for_res = 0
-                    for other_task_id, other_start_time in start_times.items():
-                        other_task = task_map.get(other_task_id)
-                        if other_task and res_id in other_task.get('resources', []):
-                            other_end_time = other_start_time + other_task['duration']
-                            # Check for overlap
-                            if max(current_time, other_start_time) < min(current_time + task['duration'], other_end_time):
-                                latest_end_time_for_res = max(latest_end_time_for_res, other_end_time)
-                    
-                    if latest_end_time_for_res > current_time:
-                        max_resource_end_time = max(max_resource_end_time, latest_end_time_for_res)
-                        conflict = True
-                
-                if conflict:
-                    current_time = max_resource_end_time # Try starting after the conflict
-                else:
-                    earliest_start = current_time # Found a conflict-free start time
+            for res_id in task_resources:
+                for other_task in tasks:
+                    if other_task['id'] != task['id'] and res_id in other_task.get('resources', []) and other_task['id'] in start_times:
+                        other_start = start_times[other_task['id']]
+                        other_end = other_start + other_task['duration']
+                        if earliest_start < other_end:
+                            earliest_start = other_end
             
-            if attempts >= max_attempts:
-                 logger.warning(f"Could not resolve resource conflict for task {task_id} in initial solution after {attempts} attempts.")
-                 # Assign earliest possible time despite conflict, SA might resolve it
-                 earliest_start = current_time 
-
-            start_times[task_id] = earliest_start
+            start_times[task['id']] = earliest_start
     
-    # Final dependency check on initial solution
-    repair_solution(start_times, tasks)
     return start_times
 
 def evaluate_solution(start_times, tasks, resources):
@@ -157,104 +128,113 @@ def evaluate_solution(start_times, tasks, resources):
         task_id = task['id']
         if task_id in start_times:
             start = start_times[task_id]
-            # Ensure duration is treated as a number
-            duration = task.get('duration', 0)
-            if not isinstance(duration, (int, float)):
-                try:
-                    duration = float(duration)
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid duration for task {task_id}: {duration}. Using 0.")
-                    duration = 0
-            end = start + duration
+            end = start + task['duration']
             makespan = max(makespan, end)
     return makespan
 
 def repair_solution(solution, tasks):
-    """Repair a solution to respect dependency constraints iteratively."""
-    task_map = {t['id']: t for t in tasks}
-    changed = True
-    passes = 0
-    max_passes = len(tasks) + 1 # Limit passes to avoid infinite loops
+    """Repair a solution to respect dependency constraints."""
+    for task in tasks:
+        task_id = task['id']
+        if task_id in solution:
+            for dep_id in task.get('dependencies', []):
+                if dep_id and dep_id in solution:
+                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
+                    if dep_task:
+                        min_start = solution[dep_id] + dep_task['duration']
+                        solution[task_id] = max(solution[task_id], min_start)
 
-    while changed and passes < max_passes:
-        changed = False
-        passes += 1
-        # Iterate through tasks (order might matter, but simple iteration often works)
-        for task in tasks:
-            task_id = task['id']
-            if task_id in solution:
-                min_start_due_to_deps = 0
-                dependencies = task.get('dependencies', [])
-                for dep_id in dependencies:
-                    if dep_id and dep_id in solution:
-                        dep_task = task_map.get(dep_id)
-                        if dep_task:
-                            # Ensure duration is treated as a number
-                            dep_duration = dep_task.get('duration', 0)
-                            if not isinstance(dep_duration, (int, float)):
-                                try:
-                                    dep_duration = float(dep_duration)
-                                except (ValueError, TypeError):
-                                    logger.warning(f"Invalid duration for dependency task {dep_id}: {dep_duration}. Using 0.")
-                                    dep_duration = 0
-                            dep_end_time = solution[dep_id] + dep_duration
-                            min_start_due_to_deps = max(min_start_due_to_deps, dep_end_time)
-                
-                # Ensure start time respects dependencies and is non-negative
-                required_start_time = max(0, min_start_due_to_deps)
-                if solution[task_id] < required_start_time:
-                    solution[task_id] = required_start_time
-                    changed = True # Mark that a change was made in this pass
+def enforce_dependencies_recursively(solution, tasks, task_id, visited=None):
+    """
+    Recursively enforce dependency constraints for a task and all tasks that depend on it.
     
-    if passes >= max_passes and changed:
-        logger.warning("Repair solution reached max passes, potential dependency cycle or complex issue.")
+    Args:
+        solution: Current solution (dictionary of task_id to start time)
+        tasks: List of all tasks
+        task_id: ID of the task to start enforcement from
+        visited: Set of task IDs already visited to prevent cycles
+    """
+    if visited is None:
+        visited = set()
+    
+    if task_id in visited:
+        return  # Avoid cycles in dependency graph
+    
+    visited.add(task_id)
+    
+    # Find the task
+    task = next((t for t in tasks if t['id'] == task_id), None)
+    if not task or task_id not in solution:
+        return
+    
+    # Enforce dependencies for this task
+    min_start = solution[task_id]
+    for dep_id in task.get('dependencies', []):
+        if dep_id and dep_id in solution:
+            dep_task = next((t for t in tasks if t['id'] == dep_id), None)
+            if dep_task:
+                dep_end = solution[dep_id] + dep_task['duration']
+                min_start = max(min_start, dep_end)
+    
+    # Update the start time if necessary
+    if min_start > solution[task_id]:
+        solution[task_id] = min_start
+        
+        # Find all tasks that depend on this task and enforce recursively
+        for dependent_task in tasks:
+            if task_id in dependent_task.get('dependencies', []) and dependent_task['id'] in solution:
+                enforce_dependencies_recursively(solution, tasks, dependent_task['id'], visited)
 
 def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     """
-    Optimize the schedule using simulated annealing.
-    Minimal fix: Ensures dependency constraints are checked iteratively after perturbation.
+    Optimize the schedule using simulated annealing with strict dependency constraints.
+    
+    Args:
+        tasks: List of tasks
+        resources: List of resources
+        initial_solution: Initial solution (optional)
+        params: Additional parameters (optional)
+        
+    Returns:
+        Best solution found
     """
+    # Parameters for simulated annealing
     params = params or {}
     initial_temp = params.get('initial_temp', 1000.0)
     cooling_rate = params.get('cooling_rate', 0.95)
     max_iterations = params.get('max_iterations', 10000)
     no_improvement_limit = params.get('no_improvement_limit', 1000)
     
+    # Initialize solution
     current_solution = initial_solution or get_initial_solution(tasks, resources)
-    # Ensure initial solution is valid
-    repair_solution(current_solution, tasks)
     current_cost = evaluate_solution(current_solution, tasks, resources)
     best_solution = current_solution.copy()
     best_cost = current_cost
     
+    # Simulated annealing algorithm
     temp = initial_temp
     iteration = 0
     no_improvement = 0
     
-    task_map = {t['id']: t for t in tasks}
-    tasks_to_optimize_ids = [t['id'] for t in tasks if 'startTime' not in t or not t['startTime']]
-
     while temp > 1 and iteration < max_iterations and no_improvement < no_improvement_limit:
-        if not tasks_to_optimize_ids:
-            logger.info("No tasks to optimize in SA.")
-            break
-            
         new_solution = current_solution.copy()
         
-        # Select a task to modify
-        task_id = random.choice(tasks_to_optimize_ids)
+        # Select a task to modify (only non-fixed tasks)
+        task_ids = [t['id'] for t in tasks if 'startTime' not in t or not t['startTime']]
+        if not task_ids:
+            break
+        task_id = random.choice(task_ids)
         
-        # Apply perturbation (shift start time)
-        perturbation = random.uniform(-temp / 100, temp / 100) # Smaller perturbation range
-        proposed_start_time = new_solution[task_id] + perturbation
+        # Apply perturbation
+        perturbation = random.uniform(-2 * (temp / initial_temp), 2 * (temp / initial_temp))
+        new_solution[task_id] += perturbation
         
-        # Ensure the new start time is non-negative
-        new_solution[task_id] = max(0, proposed_start_time)
+        # Enforce dependency constraints recursively starting from the modified task
+        enforce_dependencies_recursively(new_solution, tasks, task_id)
         
-        # *** Minimal Fix: Call iterative repair_solution AFTER perturbation ***
+        # Repair solution to handle resource conflicts
         repair_solution(new_solution, tasks)
-        # *******************************************************************
-
+        
         # Evaluate new solution
         new_cost = evaluate_solution(new_solution, tasks, resources)
         
@@ -266,7 +246,6 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
             if new_cost < best_cost:
                 best_solution = new_solution.copy()
                 best_cost = new_cost
-                # logger.debug(f"SA New best cost: {best_cost} at iter {iteration}") # Optional debug log
                 no_improvement = 0
             else:
                 no_improvement += 1
@@ -276,17 +255,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         # Cooling
         temp *= cooling_rate
         iteration += 1
-        
-        # Optional progress log
-        # if iteration % 500 == 0:
-        #      logger.debug(f"SA Iter: {iteration}, Temp: {temp:.2f}, Cost: {current_cost:.2f}, Best: {best_cost:.2f}")
-
-    logger.info(f"SA finished. Iter: {iteration}, Temp: {temp:.2f}, Best Cost: {best_cost:.2f}")
-    # Final repair on the best solution found
-    repair_solution(best_solution, tasks)
-    best_cost = evaluate_solution(best_solution, tasks, resources) # Re-evaluate after final repair
-    logger.info(f"SA final repaired Best Cost: {best_cost:.2f}")
-
+    
     return best_solution, best_cost, iteration, temp
 
 results = {}
@@ -304,38 +273,13 @@ def optimize_schedule_async():
     def optimize_schedule(tasks, resources, method, params, result_id):
         try:
             now = datetime.datetime.now()
-            # Convert deadline/startTime strings to datetime objects for internal use if needed
-            for task in tasks:
-                if isinstance(task.get('deadline'), str):
-                    try:
-                        task['deadline_dt'] = datetime.datetime.fromisoformat(task['deadline'].replace('Z', '+00:00'))
-                    except ValueError:
-                        logger.warning(f"Invalid deadline format for task {task['id']}: {task['deadline']}")
-                        task['deadline_dt'] = now + datetime.timedelta(days=365) # Default
-                if isinstance(task.get('startTime'), str):
-                     try:
-                        task['startTime_dt'] = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
-                     except ValueError:
-                        logger.warning(f"Invalid startTime format for task {task['id']}: {task['startTime']}")
-                        # Handle invalid start time - perhaps remove it?
-                        task.pop('startTime', None)
-                        task.pop('startTime_dt', None)
+            fixed_tasks = [t for t in tasks if 'startTime' in t and t['startTime']]
+            tasks_to_optimize = [t for t in tasks if 'startTime' not in t or not t['startTime']]
 
             if method == 'PuLP':
-                # --- PuLP Optimization Logic --- 
-                # Assuming pulp is correctly installed and potentially imported as needed
-                try:
-                    import pulp 
-                except ImportError:
-                     logger.error("PuLP library not found. Please install it: pip install pulp")
-                     results[result_id] = {"status": "failed", "error": "PuLP library not installed"}
-                     return
-                     
                 prob = LpProblem("Task_Scheduling", LpMinimize)
-                start_times = {task['id']: LpVariable(f"start_{task['id']}", 0) for task in tasks if 'startTime' not in task or not task['startTime']}
+                start_times = {task['id']: LpVariable(f"start_{task['id']}", 0) for task in tasks_to_optimize}
                 makespan = LpVariable("makespan", 0)
-                task_map = {t['id']: t for t in tasks}
-                tasks_to_optimize = [t for t in tasks if 'startTime' not in t or not t['startTime']]
 
                 # Makespan constraint
                 for task in tasks_to_optimize:
@@ -346,13 +290,16 @@ def optimize_schedule_async():
                     dependencies = task.get('dependencies', [])
                     for dep_id in dependencies:
                         if dep_id:
-                            dep_task = task_map.get(dep_id)
+                            dep_task = next((t for t in tasks if t['id'] == dep_id), None)
                             if dep_task:
-                                if 'startTime' in dep_task and dep_task['startTime']:
-                                    dep_start_dt = dep_task['startTime_dt']
-                                    dep_end_hours = (dep_start_dt - now).total_seconds() / 3600 + dep_task['duration']
-                                    prob += start_times[task['id']] >= dep_end_hours
-                                elif dep_id in start_times:
+                                if dep_task in fixed_tasks:
+                                    dep_start_str = dep_task['startTime'].replace('Z', '')
+                                    if '+' in dep_start_str:
+                                        dep_start_str = dep_start_str.split('+')[0]
+                                    dep_start = datetime.datetime.fromisoformat(dep_start_str)
+                                    dep_end = (dep_start - now).total_seconds() / 3600 + dep_task['duration']
+                                    prob += start_times[task['id']] >= dep_end
+                                else:
                                     prob += start_times[task['id']] >= start_times[dep_id] + dep_task['duration']
 
                 # Resource constraints
@@ -366,67 +313,88 @@ def optimize_schedule_async():
                     for i in range(len(res_tasks)):
                         for j in range(i + 1, len(res_tasks)):
                             t1, t2 = res_tasks[i], res_tasks[j]
-                            if t1['id'] in start_times and t2['id'] in start_times:
-                                b = LpVariable(f"b_{t1['id']}_{t2['id']}", cat='Binary')
-                                M = sum(t['duration'] for t in tasks) + 1 # A large number
-                                prob += start_times[t1['id']] + t1['duration'] <= start_times[t2['id']] + M * (1 - b)
-                                prob += start_times[t2['id']] + t2['duration'] <= start_times[t1['id']] + M * b
+                            b = LpVariable(f"b_{t1['id']}_{t2['id']}", cat='Binary')
+                            prob += start_times[t1['id']] + t1['duration'] <= start_times[t2['id']] + 1000 * (1 - b)
+                            prob += start_times[t2['id']] + t2['duration'] <= start_times[t1['id']] + 1000 * b
 
                 # Deadline constraints (optional)
                 if params.get('enforce_deadlines', False):
                     for task in tasks_to_optimize:
-                        if 'deadline_dt' in task:
-                            deadline_hours = (task['deadline_dt'] - now).total_seconds() / 3600
-                            prob += start_times[task['id']] + task['duration'] <= deadline_hours
+                        deadline_str = task['deadline'].replace('Z', '')
+                        if '+' in deadline_str:
+                            deadline_str = deadline_str.split('+')[0]
+                        deadline = datetime.datetime.fromisoformat(deadline_str)
+                        deadline_hours = (deadline - now).total_seconds() / 3600
+                        prob += start_times[task['id']] + task['duration'] <= deadline_hours
 
                 # Objective function: minimize makespan
                 prob += makespan
 
-                # Set a time limit for the solver
-                time_limit = params.get('pulp_time_limit', 30) # Default 30 seconds
-                solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=1)
-                prob.solve(solver)
-
-                if LpStatus[prob.status] == 'Optimal' or LpStatus[prob.status] == 'Feasible':
-                    status_msg = "Optimal" if LpStatus[prob.status] == 'Optimal' else "Feasible"
-                    logger.info(f"{status_msg} solution found with PuLP for result_id {result_id}")
-                    optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize if task['id'] in start_times and start_times[task['id']].varValue is not None}
+                prob.solve()
+                if LpStatus[prob.status] == 'Optimal':
+                    logger.info(f"Optimal solution found with PuLP for result_id {result_id}")
+                    optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize}
                     
-                    # Check if makespan has a value
-                    makespan_val = value(makespan) if makespan.varValue is not None else evaluate_solution(optimized_start_times, tasks, resources)
+                    makespan_val = value(makespan)
                     throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
                     logger.info(f"Calculated makespan: {makespan_val}, throughput: {throughput} for result_id {result_id}")
                     
-                    metrics = {"makespan": makespan_val, "throughput": throughput}
-                    penalties = {"deadline_violations": 0.0, "dependency_violations": 0.0, "resource_conflicts": 0.0}
+                    # Calculate additional metrics
+                    metrics = {
+                        "makespan": makespan_val,
+                        "throughput": throughput,
+                    }
                     
+                    # Calculate penalties
+                    penalties = {
+                        "deadline_violations": 0.0,
+                        "dependency_violations": 0.0,
+                        "resource_conflicts": 0.0
+                    }
+                    
+                    # Update tasks with start times
                     final_tasks = []
                     for task in tasks:
-                        task_copy = task.copy()
-                        if task_copy['id'] in optimized_start_times:
-                            start_hour = optimized_start_times[task_copy['id']]
+                        if task['id'] in optimized_start_times:
+                            start_hour = optimized_start_times[task['id']]
                             start_time = now + datetime.timedelta(hours=start_hour)
-                            task_copy['startTime'] = start_time.isoformat() + 'Z'
-                            end_time = start_time + datetime.timedelta(hours=task_copy['duration'])
-                            if 'deadline_dt' in task_copy and end_time > task_copy['deadline_dt']:
-                                penalties["deadline_violations"] += (end_time - task_copy['deadline_dt']).total_seconds() / 3600
-                        task_copy.pop('deadline_dt', None)
-                        task_copy.pop('startTime_dt', None)
-                        final_tasks.append(task_copy)
+                            task['startTime'] = start_time.isoformat()
+                            end = start_time + datetime.timedelta(hours=task['duration'])
+                            deadline_str = task['deadline'].replace('Z', '')
+                            if '+' in deadline_str:
+                                deadline_str = deadline_str.split('+')[0]
+                            deadline = datetime.datetime.fromisoformat(deadline_str)
+                            if end > deadline:
+                                penalties["deadline_violations"] += (end - deadline).total_seconds() / 3600
+                        final_tasks.append(task)
                     
-                    metrics["resource_utilization"] = {} # Placeholder
+                    # Calculate resource utilization
+                    resource_utilization = {}
+                    for res_id in set(res_id for task in tasks for res_id in task.get('resources', [])):
+                        total_time = 0
+                        for task in final_tasks:
+                            if res_id in task.get('resources', []) and 'startTime' in task and task['startTime']:
+                                total_time += task['duration']
+                        resource_utilization[res_id] = total_time / makespan_val if makespan_val > 0 else 0
+                    
+                    metrics["resource_utilization"] = resource_utilization
                     metrics["penalties"] = penalties
                     
-                    results[result_id] = {"status": "completed", "tasks": final_tasks, "metrics": metrics}
-                    logger.info(f"Stored result for {result_id}")
+                    results[result_id] = {
+                        "status": "completed",
+                        "tasks": final_tasks,
+                        "metrics": metrics
+                    }
+                    logger.info(f"Stored result for {result_id}: {results[result_id]}")
                 else:
                     logger.error(f"PuLP failed for result_id {result_id} (status: {LpStatus[prob.status]})")
-                    results[result_id] = {"status": "failed", "error": f"PuLP failed (status: {LpStatus[prob.status]})"}
+                    results[result_id] = {
+                        "status": "failed",
+                        "error": f"PuLP failed (status: {LpStatus[prob.status]})"
+                    }
                     return
-            # --- End PuLP --- 
 
             elif method == 'SimulatedAnnealing':
-                logger.info(f"Starting Simulated Annealing for result_id {result_id}")
                 sa_params = {
                     'initial_temp': params.get('initial_temp', 1000.0),
                     'cooling_rate': params.get('cooling_rate', 0.95),
@@ -442,33 +410,55 @@ def optimize_schedule_async():
                 throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
                 logger.info(f"Calculated makespan: {makespan_val}, throughput: {throughput} for result_id {result_id} using SA")
                 
+                # Calculate additional metrics
                 metrics = {
                     "makespan": makespan_val,
                     "throughput": throughput,
                     "iterations": iterations,
                     "final_temperature": final_temp
                 }
-                penalties = {"deadline_violations": 0.0, "dependency_violations": 0.0, "resource_conflicts": 0.0}
                 
+                # Calculate penalties
+                penalties = {
+                    "deadline_violations": 0.0,
+                    "dependency_violations": 0.0,
+                    "resource_conflicts": 0.0
+                }
+                
+                # Update tasks with start times
                 final_tasks = []
                 for task in tasks:
-                    task_copy = task.copy()
-                    if task_copy['id'] in best_solution:
-                        start_hour = best_solution[task_copy['id']]
+                    if task['id'] in best_solution:
+                        start_hour = best_solution[task['id']]
                         start_time = now + datetime.timedelta(hours=start_hour)
-                        task_copy['startTime'] = start_time.isoformat() + 'Z'
-                        end_time = start_time + datetime.timedelta(hours=task_copy['duration'])
-                        if 'deadline_dt' in task_copy and end_time > task_copy['deadline_dt']:
-                            penalties["deadline_violations"] += (end_time - task_copy['deadline_dt']).total_seconds() / 3600
-                    task_copy.pop('deadline_dt', None)
-                    task_copy.pop('startTime_dt', None)
-                    final_tasks.append(task_copy)
+                        task['startTime'] = start_time.isoformat()
+                        end = start_time + datetime.timedelta(hours=task['duration'])
+                        deadline_str = task['deadline'].replace('Z', '')
+                        if '+' in deadline_str:
+                            deadline_str = deadline_str.split('+')[0]
+                        deadline = datetime.datetime.fromisoformat(deadline_str)
+                        if end > deadline:
+                            penalties["deadline_violations"] += (end - deadline).total_seconds() / 3600
+                    final_tasks.append(task)
                 
-                metrics["resource_utilization"] = {} # Placeholder
+                # Calculate resource utilization
+                resource_utilization = {}
+                for res_id in set(res_id for task in tasks for res_id in task.get('resources', [])):
+                    total_time = 0
+                    for task in final_tasks:
+                        if res_id in task.get('resources', []) and 'startTime' in task and task['startTime']:
+                            total_time += task['duration']
+                    resource_utilization[res_id] = total_time / makespan_val if makespan_val > 0 else 0
+                
+                metrics["resource_utilization"] = resource_utilization
                 metrics["penalties"] = penalties
                 
-                results[result_id] = {"status": "completed", "tasks": final_tasks, "metrics": metrics}
-                logger.info(f"Stored result for {result_id}")
+                results[result_id] = {
+                    "status": "completed",
+                    "tasks": final_tasks,
+                    "metrics": metrics
+                }
+                logger.info(f"Stored result for {result_id}: {results[result_id]}")
             else:
                 logger.error(f"Invalid optimization method '{method}' for result_id {result_id}")
                 results[result_id] = {"status": "failed", "error": "Invalid optimization method"}
@@ -485,21 +475,27 @@ def optimize_schedule_async():
 @app.route('/result/<result_id>', methods=['GET'])
 def get_result(result_id):
     result = results.get(result_id, {"status": "not_found"})
+    logger.info(f"Fetching result for {result_id}: {result}")
     
+    # Restructure the response if completed to match client expectations
     if result.get("status") == "completed":
         metrics = result.get("metrics", {})
+        penalties = metrics.get("penalties", {})
+        # Create a new dictionary with metrics at the top level
         response_data = {
             "status": "completed",
             "tasks": result.get("tasks", []),
             "makespan": metrics.get("makespan"),
             "throughput": metrics.get("throughput"),
-            "metrics": metrics 
+            "penalties": penalties, # Keep penalties nested or flatten if needed
+            # Include other top-level metrics if necessary
         }
+        logger.info(f"Returning restructured result for {result_id}: {response_data}")
         return jsonify(response_data)
     else:
+        # Return the original result for pending, failed, or not_found statuses
+        logger.info(f"Returning original result for {result_id}: {result}")
         return jsonify(result)
 
 if __name__ == '__main__':
-    # Make sure to install necessary packages: pip install Flask Flask-Cors pulp
     app.run(host='0.0.0.0', port=3000, debug=True)
-
