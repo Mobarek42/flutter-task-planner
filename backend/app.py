@@ -8,6 +8,11 @@ import random
 import math
 import threading
 import uuid
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})  # Allow requests from any origin
@@ -23,7 +28,7 @@ def init_db():
         columns = [col[1] for col in cursor.fetchall()]
         if 'start_time' not in columns:
             conn.execute('ALTER TABLE tasks ADD COLUMN start_time TEXT')
-            print("Column 'start_time' added to table 'tasks'")
+            logger.info("Column 'start_time' added to table 'tasks'")
         conn.execute('''CREATE TABLE IF NOT EXISTS resources (
             id TEXT PRIMARY KEY, name TEXT, type TEXT, is_available INTEGER, cost REAL)''')
 
@@ -43,7 +48,7 @@ def get_tasks():
 @app.route('/tasks', methods=['POST'])
 def add_task():
     task = request.get_json()
-    print("Task received:", task)
+    logger.info(f"Task received: {task}")
     with sqlite3.connect(DATABASE) as conn:
         conn.execute('INSERT INTO tasks (id, name, description, deadline, duration, priority, dependencies, resources, start_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                      (task['id'], task['name'], task['description'], task['deadline'], task['duration'],
@@ -294,11 +299,12 @@ def optimize_schedule_async():
 
                 prob.solve()
                 if LpStatus[prob.status] == 'Optimal':
-                    print("Optimal solution found with PuLP")
+                    logger.info(f"Optimal solution found with PuLP for result_id {result_id}")
                     optimized_start_times = {task['id']: value(start_times[task['id']]) for task in tasks_to_optimize}
                     
                     makespan_val = value(makespan)
                     throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
+                    logger.info(f"Calculated makespan: {makespan_val}, throughput: {throughput} for result_id {result_id}")
                     
                     # Calculate additional metrics
                     metrics = {
@@ -346,7 +352,9 @@ def optimize_schedule_async():
                         "tasks": final_tasks,
                         "metrics": metrics
                     }
+                    logger.info(f"Stored result for {result_id}: {results[result_id]}")
                 else:
+                    logger.error(f"PuLP failed for result_id {result_id} (status: {LpStatus[prob.status]})")
                     results[result_id] = {
                         "status": "failed",
                         "error": f"PuLP failed (status: {LpStatus[prob.status]})"
@@ -367,6 +375,7 @@ def optimize_schedule_async():
                 
                 makespan_val = best_cost
                 throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
+                logger.info(f"Calculated makespan: {makespan_val}, throughput: {throughput} for result_id {result_id} using SA")
                 
                 # Calculate additional metrics
                 metrics = {
@@ -416,11 +425,13 @@ def optimize_schedule_async():
                     "tasks": final_tasks,
                     "metrics": metrics
                 }
+                logger.info(f"Stored result for {result_id}: {results[result_id]}")
             else:
+                logger.error(f"Invalid optimization method '{method}' for result_id {result_id}")
                 results[result_id] = {"status": "failed", "error": "Invalid optimization method"}
         except Exception as e:
+            logger.exception(f"Optimization failed for result_id {result_id}: {e}")
             results[result_id] = {"status": "failed", "error": str(e)}
-            print(f"Optimization failed for {result_id}: {e}")
 
     thread = threading.Thread(target=optimize_schedule, args=(tasks, resources, method, params, result_id))
     thread.start()
@@ -431,8 +442,28 @@ def optimize_schedule_async():
 @app.route('/result/<result_id>', methods=['GET'])
 def get_result(result_id):
     result = results.get(result_id, {"status": "not_found"})
-    return jsonify(result)
+    logger.info(f"Fetching result for {result_id}: {result}")
+    
+    # Restructure the response if completed to match client expectations
+    if result.get("status") == "completed":
+        metrics = result.get("metrics", {})
+        penalties = metrics.get("penalties", {})
+        # Create a new dictionary with metrics at the top level
+        response_data = {
+            "status": "completed",
+            "tasks": result.get("tasks", []),
+            "makespan": metrics.get("makespan"),
+            "throughput": metrics.get("throughput"),
+            "penalties": penalties, # Keep penalties nested or flatten if needed
+            # Include other top-level metrics if necessary
+        }
+        logger.info(f"Returning restructured result for {result_id}: {response_data}")
+        return jsonify(response_data)
+    else:
+        # Return the original result for pending, failed, or not_found statuses
+        logger.info(f"Returning original result for {result_id}: {result}")
+        return jsonify(result)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=3000, debug=True)
 
