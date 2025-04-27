@@ -185,6 +185,29 @@ def enforce_dependencies_recursively(solution, tasks, task_id, visited=None):
             if task_id in dependent_task.get('dependencies', []) and dependent_task['id'] in solution:
                 enforce_dependencies_recursively(solution, tasks, dependent_task['id'], visited)
 
+def validate_solution(solution, tasks):
+    """
+    Validate that the solution respects all dependency constraints.
+    
+    Args:
+        solution: Current solution (dictionary of task_id to start time)
+        tasks: List of all tasks
+        
+    Returns:
+        bool: True if the solution is valid, False otherwise
+    """
+    for task in tasks:
+        task_id = task['id']
+        if task_id in solution:
+            for dep_id in task.get('dependencies', []):
+                if dep_id and dep_id in solution:
+                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
+                    if dep_task:
+                        dep_end = solution[dep_id] + dep_task['duration']
+                        if solution[task_id] < dep_end:
+                            return False
+    return True
+
 def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     """
     Optimize the schedule using simulated annealing with strict dependency constraints.
@@ -229,11 +252,19 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         perturbation = random.uniform(-2 * (temp / initial_temp), 2 * (temp / initial_temp))
         new_solution[task_id] += perturbation
         
-        # Enforce dependency constraints recursively starting from the modified task
+        # Enforce dependency constraints recursively after perturbation
         enforce_dependencies_recursively(new_solution, tasks, task_id)
         
         # Repair solution to handle resource conflicts
         repair_solution(new_solution, tasks)
+        
+        # Re-enforce dependency constraints after resource repair
+        for tid in task_ids:
+            enforce_dependencies_recursively(new_solution, tasks, tid)
+        
+        # Validate the solution to ensure all dependencies are respected
+        if not validate_solution(new_solution, tasks):
+            continue  # Skip this iteration if dependencies are violated
         
         # Evaluate new solution
         new_cost = evaluate_solution(new_solution, tasks, resources)
