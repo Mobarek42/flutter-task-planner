@@ -144,70 +144,6 @@ def repair_solution(solution, tasks):
                         min_start = solution[dep_id] + dep_task['duration']
                         solution[task_id] = max(solution[task_id], min_start)
 
-def enforce_dependencies_recursively(solution, tasks, task_id, visited=None):
-    """
-    Recursively enforce dependency constraints for a task and all tasks that depend on it.
-    
-    Args:
-        solution: Current solution (dictionary of task_id to start time)
-        tasks: List of all tasks
-        task_id: ID of the task to start enforcement from
-        visited: Set of task IDs already visited to prevent cycles
-    """
-    if visited is None:
-        visited = set()
-    
-    if task_id in visited:
-        return  # Avoid cycles in dependency graph
-    
-    visited.add(task_id)
-    
-    # Find the task
-    task = next((t for t in tasks if t['id'] == task_id), None)
-    if not task or task_id not in solution:
-        return
-    
-    # Enforce dependencies for this task
-    min_start = solution[task_id]
-    for dep_id in task.get('dependencies', []):
-        if dep_id and dep_id in solution:
-            dep_task = next((t for t in tasks if t['id'] == dep_id), None)
-            if dep_task:
-                dep_end = solution[dep_id] + dep_task['duration']
-                min_start = max(min_start, dep_end)
-    
-    # Update the start time if necessary
-    if min_start > solution[task_id]:
-        solution[task_id] = min_start
-        
-        # Find all tasks that depend on this task and enforce recursively
-        for dependent_task in tasks:
-            if task_id in dependent_task.get('dependencies', []) and dependent_task['id'] in solution:
-                enforce_dependencies_recursively(solution, tasks, dependent_task['id'], visited)
-
-def validate_solution(solution, tasks):
-    """
-    Validate that the solution respects all dependency constraints.
-    
-    Args:
-        solution: Current solution (dictionary of task_id to start time)
-        tasks: List of all tasks
-        
-    Returns:
-        bool: True if the solution is valid, False otherwise
-    """
-    for task in tasks:
-        task_id = task['id']
-        if task_id in solution:
-            for dep_id in task.get('dependencies', []):
-                if dep_id and dep_id in solution:
-                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
-                    if dep_task:
-                        dep_end = solution[dep_id] + dep_task['duration']
-                        if solution[task_id] < dep_end:
-                            return False
-    return True
-
 def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     """
     Optimize the schedule using simulated annealing with strict dependency constraints.
@@ -252,19 +188,19 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         perturbation = random.uniform(-2 * (temp / initial_temp), 2 * (temp / initial_temp))
         new_solution[task_id] += perturbation
         
-        # Enforce dependency constraints recursively after perturbation
-        enforce_dependencies_recursively(new_solution, tasks, task_id)
+        # Enforce dependency constraints strictly
+        for task in tasks:
+            if task['id'] in new_solution:
+                for dep_id in task.get('dependencies', []):
+                    if dep_id and dep_id in new_solution:
+                        dep_task = next((t for t in tasks if t['id'] == dep_id), None)
+                        if dep_task:
+                            # Ensure task starts after all dependencies are complete
+                            min_start = new_solution[dep_id] + dep_task['duration']
+                            new_solution[task['id']] = max(new_solution[task['id']], min_start)
         
         # Repair solution to handle resource conflicts
         repair_solution(new_solution, tasks)
-        
-        # Re-enforce dependency constraints after resource repair
-        for tid in task_ids:
-            enforce_dependencies_recursively(new_solution, tasks, tid)
-        
-        # Validate the solution to ensure all dependencies are respected
-        if not validate_solution(new_solution, tasks):
-            continue  # Skip this iteration if dependencies are violated
         
         # Evaluate new solution
         new_cost = evaluate_solution(new_solution, tasks, resources)
@@ -530,3 +466,4 @@ def get_result(result_id):
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000, debug=True)
+
