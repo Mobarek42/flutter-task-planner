@@ -132,17 +132,139 @@ def evaluate_solution(start_times, tasks, resources):
             makespan = max(makespan, end)
     return makespan
 
-def repair_solution(solution, tasks):
-    """Repair a solution to respect dependency constraints."""
+def strictly_enforce_dependencies(solution, tasks):
+    """
+    Ensure that dependency constraints are strictly enforced.
+    Modifies the solution in place.
+    
+    Args:
+        solution: Dictionary mapping task IDs to start times
+        tasks: List of task objects
+    """
+    # Create a dictionary for quick task lookup
+    task_dict = {task['id']: task for task in tasks}
+    
+    # Build a dependency graph
+    dep_graph = {}
     for task in tasks:
         task_id = task['id']
+        dep_graph[task_id] = task.get('dependencies', [])
+    
+    # Topologically sort tasks (respecting dependencies)
+    visited = set()
+    temp_visited = set()
+    order = []
+    
+    def visit(task_id):
+        if task_id in temp_visited:  # This means we have a cycle
+            return
+        if task_id in visited:
+            return
+        
+        temp_visited.add(task_id)
+        for dep_id in dep_graph.get(task_id, []):
+            if dep_id:  # Skip empty dependencies
+                visit(dep_id)
+        
+        temp_visited.remove(task_id)
+        visited.add(task_id)
+        order.append(task_id)
+    
+    for task_id in dep_graph:
+        if task_id not in visited:
+            visit(task_id)
+    
+    # Process tasks in topological order
+    for task_id in reversed(order):
         if task_id in solution:
-            for dep_id in task.get('dependencies', []):
+            # Get the task's start time
+            start_time = solution[task_id]
+            
+            # Check all dependencies
+            dependencies = dep_graph.get(task_id, [])
+            for dep_id in dependencies:
                 if dep_id and dep_id in solution:
-                    dep_task = next((t for t in tasks if t['id'] == dep_id), None)
-                    if dep_task:
-                        min_start = solution[dep_id] + dep_task['duration']
-                        solution[task_id] = max(solution[task_id], min_start)
+                    dep_duration = task_dict[dep_id]['duration']
+                    dep_end_time = solution[dep_id] + dep_duration
+                    
+                    # Ensure that the task starts after all its dependencies are completed
+                    if start_time < dep_end_time:
+                        solution[task_id] = dep_end_time
+
+def repair_solution(solution, tasks):
+    """
+    Repair a solution to respect dependency constraints and resource constraints.
+    This is a more thorough implementation that combines dependency and resource checks.
+    """
+    # First, strictly enforce dependencies
+    strictly_enforce_dependencies(solution, tasks)
+    
+    # Create a dictionary for quick task lookup
+    task_dict = {task['id']: task for task in tasks}
+    
+    # Resolve resource conflicts
+    has_conflicts = True
+    max_iterations = 100  # Prevent infinite loops
+    iteration = 0
+    
+    while has_conflicts and iteration < max_iterations:
+        has_conflicts = False
+        iteration += 1
+        
+        # Check for resource conflicts
+        for i, task1 in enumerate(tasks):
+            task1_id = task1['id']
+            if task1_id not in solution:
+                continue
+                
+            task1_start = solution[task1_id]
+            task1_end = task1_start + task1['duration']
+            task1_resources = task1.get('resources', [])
+            
+            for j, task2 in enumerate(tasks):
+                if i == j:
+                    continue
+                    
+                task2_id = task2['id']
+                if task2_id not in solution:
+                    continue
+                    
+                task2_start = solution[task2_id]
+                task2_end = task2_start + task2['duration']
+                task2_resources = task2.get('resources', [])
+                
+                # Check if tasks overlap in time
+                if not (task1_end <= task2_start or task2_end <= task1_start):
+                    # Check if tasks share any resources
+                    shared_resources = set(task1_resources).intersection(set(task2_resources))
+                    if shared_resources:
+                        has_conflicts = True
+                        
+                        # Decide which task to move
+                        # Prefer to move the task with lower priority or later deadline
+                        task1_priority = task1.get('priority', 0)
+                        task2_priority = task2.get('priority', 0)
+                        
+                        if task1_priority > task2_priority:
+                            # Move task2 after task1
+                            solution[task2_id] = task1_end
+                        elif task2_priority > task1_priority:
+                            # Move task1 after task2
+                            solution[task1_id] = task2_end
+                        else:
+                            # If priorities are equal, move the task with a later deadline
+                            task1_deadline = datetime.datetime.fromisoformat(task1['deadline'].replace('Z', '+00:00'))
+                            task2_deadline = datetime.datetime.fromisoformat(task2['deadline'].replace('Z', '+00:00'))
+                            
+                            if task1_deadline > task2_deadline:
+                                solution[task1_id] = task2_end
+                            else:
+                                solution[task2_id] = task1_end
+        
+        # After resolving resource conflicts, re-enforce dependencies
+        strictly_enforce_dependencies(solution, tasks)
+    
+    return solution
 
 def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     """
@@ -164,8 +286,15 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     max_iterations = params.get('max_iterations', 10000)
     no_improvement_limit = params.get('no_improvement_limit', 1000)
     
+    # Create a task dictionary for quick lookups
+    task_dict = {task['id']: task for task in tasks}
+    
     # Initialize solution
     current_solution = initial_solution or get_initial_solution(tasks, resources)
+    
+    # Apply strict dependency enforcement to initial solution
+    strictly_enforce_dependencies(current_solution, tasks)
+    
     current_cost = evaluate_solution(current_solution, tasks, resources)
     best_solution = current_solution.copy()
     best_cost = current_cost
@@ -188,16 +317,11 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         perturbation = random.uniform(-2 * (temp / initial_temp), 2 * (temp / initial_temp))
         new_solution[task_id] += perturbation
         
-        # Enforce dependency constraints strictly
-        for task in tasks:
-            if task['id'] in new_solution:
-                for dep_id in task.get('dependencies', []):
-                    if dep_id and dep_id in new_solution:
-                        dep_task = next((t for t in tasks if t['id'] == dep_id), None)
-                        if dep_task:
-                            # Ensure task starts after all dependencies are complete
-                            min_start = new_solution[dep_id] + dep_task['duration']
-                            new_solution[task['id']] = max(new_solution[task['id']], min_start)
+        # Enforce non-negative start times
+        new_solution[task_id] = max(0, new_solution[task_id])
+        
+        # Strictly enforce dependency constraints
+        strictly_enforce_dependencies(new_solution, tasks)
         
         # Repair solution to handle resource conflicts
         repair_solution(new_solution, tasks)
@@ -222,6 +346,9 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         # Cooling
         temp *= cooling_rate
         iteration += 1
+    
+    # Final check to ensure all dependencies are still satisfied
+    strictly_enforce_dependencies(best_solution, tasks)
     
     return best_solution, best_cost, iteration, temp
 
@@ -369,6 +496,9 @@ def optimize_schedule_async():
                     'no_improvement_limit': params.get('no_improvement_limit', 1000)
                 }
                 initial_solution = get_initial_solution(tasks, resources)
+                # Ensure initial solution respects dependencies
+                strictly_enforce_dependencies(initial_solution, tasks)
+                
                 best_solution, best_cost, iterations, final_temp = simulated_annealing(
                     tasks, resources, initial_solution=initial_solution, params=sa_params
                 )
@@ -407,6 +537,20 @@ def optimize_schedule_async():
                         if end > deadline:
                             penalties["deadline_violations"] += (end - deadline).total_seconds() / 3600
                     final_tasks.append(task)
+                
+                # Validate dependency constraints
+                for task in final_tasks:
+                    dependencies = task.get('dependencies', [])
+                    for dep_id in dependencies:
+                        if dep_id:
+                            dep_task = next((t for t in final_tasks if t['id'] == dep_id), None)
+                            if (
+                                dep_task and 'startTime' in dep_task and 'startTime' in task and 
+                                datetime.datetime.fromisoformat(task['startTime'].replace('Z', '')) < 
+                                datetime.datetime.fromisoformat(dep_task['startTime'].replace('Z', '')) + 
+                                datetime.timedelta(hours=dep_task['duration'])
+                            ):
+                                penalties["dependency_violations"] += 1
                 
                 # Calculate resource utilization
                 resource_utilization = {}
@@ -466,4 +610,3 @@ def get_result(result_id):
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000, debug=True)
-
