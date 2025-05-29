@@ -137,30 +137,40 @@ def get_initial_solution(tasks, resources):
 def evaluate_solution(start_times, tasks, resources, now=None):
     """
     Evaluate the quality of a solution (makespan).
-    CORRECTION: Calcule correctement le makespan en tenant compte des tâches fixes
+    CORRECTION: Le makespan pour SA doit être calculé comme la durée totale du projet,
+    depuis le début de la première tâche jusqu'à la fin de la dernière tâche.
     """
     if now is None:
         now = datetime.datetime.now()
     
-    makespan = 0
+    earliest_start = float('inf')
+    latest_end = float('-inf')
     
     for task in tasks:
         task_id = task['id']
         
         if is_task_fixed(task):
-            # Pour les tâches fixes, calculer le temps de fin à partir du startTime absolu
+            # Pour les tâches fixes, utiliser le startTime absolu
             start_time = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
-            end_time = start_time + datetime.timedelta(hours=task['duration'])
-            # Convertir en heures relatives au moment actuel
-            task_end_hours = (end_time - now).total_seconds() / 3600
-            makespan = max(makespan, task_end_hours)
+            start_hours = (start_time - now).total_seconds() / 3600
+            end_hours = start_hours + task['duration']
+            
+            earliest_start = min(earliest_start, start_hours)
+            latest_end = max(latest_end, end_hours)
         elif task_id in start_times:
             # Pour les tâches optimisables, utiliser les temps relatifs
-            start = start_times[task_id]
-            end = start + task['duration']
-            makespan = max(makespan, end)
+            start_hours = start_times[task_id]
+            end_hours = start_hours + task['duration']
+            
+            earliest_start = min(earliest_start, start_hours)
+            latest_end = max(latest_end, end_hours)
     
-    return makespan
+    # Le makespan est la différence entre la fin de la dernière tâche et le début de la première
+    if earliest_start == float('inf') or latest_end == float('-inf'):
+        return 0
+    
+    makespan = latest_end - earliest_start
+    return max(makespan, 0)  # S'assurer que le makespan n'est jamais négatif
 
 def strictly_enforce_dependencies(solution, tasks):
     """
@@ -219,7 +229,7 @@ def strictly_enforce_dependencies(solution, tasks):
                     dep_task = task_dict[dep_id]
                     
                     if is_task_fixed(dep_task):
-                        # CORRECTION: Pour les dépendances fixes, calculer le temps de fin en heures relatives
+                        # Pour les dépendances fixes, calculer le temps de fin en heures relatives
                         dep_start_abs = datetime.datetime.fromisoformat(dep_task['startTime'].replace('Z', '+00:00'))
                         dep_end_abs = dep_start_abs + datetime.timedelta(hours=dep_task['duration'])
                         dep_end_relative = (dep_end_abs - now).total_seconds() / 3600
