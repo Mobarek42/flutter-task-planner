@@ -134,15 +134,32 @@ def get_initial_solution(tasks, resources):
     
     return start_times
 
-def evaluate_solution(start_times, tasks, resources):
-    """Evaluate the quality of a solution (makespan)."""
+def evaluate_solution(start_times, tasks, resources, now=None):
+    """
+    Evaluate the quality of a solution (makespan).
+    CORRECTION: Calcule correctement le makespan en tenant compte des tâches fixes
+    """
+    if now is None:
+        now = datetime.datetime.now()
+    
     makespan = 0
+    
     for task in tasks:
         task_id = task['id']
-        if task_id in start_times:
+        
+        if is_task_fixed(task):
+            # Pour les tâches fixes, calculer le temps de fin à partir du startTime absolu
+            start_time = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
+            end_time = start_time + datetime.timedelta(hours=task['duration'])
+            # Convertir en heures relatives au moment actuel
+            task_end_hours = (end_time - now).total_seconds() / 3600
+            makespan = max(makespan, task_end_hours)
+        elif task_id in start_times:
+            # Pour les tâches optimisables, utiliser les temps relatifs
             start = start_times[task_id]
             end = start + task['duration']
             makespan = max(makespan, end)
+    
     return makespan
 
 def strictly_enforce_dependencies(solution, tasks):
@@ -151,9 +168,11 @@ def strictly_enforce_dependencies(solution, tasks):
     Modifies the solution in place.
     
     Args:
-        solution: Dictionary mapping task IDs to start times
+        solution: Dictionary mapping task IDs to start times (en heures relatives)
         tasks: List of task objects
     """
+    now = datetime.datetime.now()
+    
     # Create a dictionary for quick task lookup
     task_dict = {task['id']: task for task in tasks}
     
@@ -196,13 +215,24 @@ def strictly_enforce_dependencies(solution, tasks):
             # Check all dependencies
             dependencies = dep_graph.get(task_id, [])
             for dep_id in dependencies:
-                if dep_id and dep_id in solution:
-                    dep_duration = task_dict[dep_id]['duration']
-                    dep_end_time = solution[dep_id] + dep_duration
+                if dep_id:
+                    dep_task = task_dict[dep_id]
                     
-                    # Ensure that the task starts after all its dependencies are completed
-                    if start_time < dep_end_time:
-                        solution[task_id] = dep_end_time
+                    if is_task_fixed(dep_task):
+                        # CORRECTION: Pour les dépendances fixes, calculer le temps de fin en heures relatives
+                        dep_start_abs = datetime.datetime.fromisoformat(dep_task['startTime'].replace('Z', '+00:00'))
+                        dep_end_abs = dep_start_abs + datetime.timedelta(hours=dep_task['duration'])
+                        dep_end_relative = (dep_end_abs - now).total_seconds() / 3600
+                        
+                        if start_time < dep_end_relative:
+                            solution[task_id] = dep_end_relative
+                    elif dep_id in solution:
+                        # Pour les dépendances optimisables
+                        dep_duration = dep_task['duration']
+                        dep_end_time = solution[dep_id] + dep_duration
+                        
+                        if start_time < dep_end_time:
+                            solution[task_id] = dep_end_time
 
 def repair_solution(solution, tasks):
     """
@@ -299,6 +329,9 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     max_iterations = params.get('max_iterations', 10000)
     no_improvement_limit = params.get('no_improvement_limit', 1000)
     
+    # CORRECTION: Passer le moment actuel pour cohérence
+    now = datetime.datetime.now()
+    
     # Create a task dictionary for quick lookups
     task_dict = {task['id']: task for task in tasks}
     
@@ -308,7 +341,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     # Apply strict dependency enforcement to initial solution
     strictly_enforce_dependencies(current_solution, tasks)
     
-    current_cost = evaluate_solution(current_solution, tasks, resources)
+    current_cost = evaluate_solution(current_solution, tasks, resources, now)
     best_solution = current_solution.copy()
     best_cost = current_cost
     
@@ -340,7 +373,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         repair_solution(new_solution, tasks)
         
         # Evaluate new solution
-        new_cost = evaluate_solution(new_solution, tasks, resources)
+        new_cost = evaluate_solution(new_solution, tasks, resources, now)
         
         # Metropolis criterion
         delta = new_cost - current_cost
@@ -363,7 +396,10 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
     # Final check to ensure all dependencies are still satisfied
     strictly_enforce_dependencies(best_solution, tasks)
     
-    return best_solution, best_cost, iteration, temp
+    # CORRECTION: Recalculer le coût final pour s'assurer de la cohérence
+    final_cost = evaluate_solution(best_solution, tasks, resources, now)
+    
+    return best_solution, final_cost, iteration, temp
 
 results = {}
 
