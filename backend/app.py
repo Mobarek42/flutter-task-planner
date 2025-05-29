@@ -9,6 +9,7 @@ import math
 import threading
 import uuid
 import logging
+import copy
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,6 +83,10 @@ def delete_resource(resource_id):
         conn.execute('DELETE FROM resources WHERE id = ?', (resource_id,))
     return '', 200
 
+def is_task_fixed(task):
+    """Détermine si une tâche a un startTime fixe (défini par l'utilisateur)"""
+    return 'startTime' in task and task['startTime'] and not task.get('_computed_start_time', False)
+
 def get_initial_solution(tasks, resources):
     now = datetime.datetime.now()
     start_times = {}
@@ -93,7 +98,7 @@ def get_initial_solution(tasks, resources):
     ))
     
     for task in sorted_tasks:
-        if 'startTime' in task and task['startTime']:
+        if is_task_fixed(task):
             start_times[task['id']] = (datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00')) - now).total_seconds() / 3600
         else:
             earliest_start = 0
@@ -308,7 +313,7 @@ def simulated_annealing(tasks, resources, initial_solution=None, params=None):
         new_solution = current_solution.copy()
         
         # Select a task to modify (only non-fixed tasks)
-        task_ids = [t['id'] for t in tasks if 'startTime' not in t or not t['startTime']]
+        task_ids = [t['id'] for t in tasks if not is_task_fixed(t)]
         if not task_ids:
             break
         task_id = random.choice(task_ids)
@@ -357,7 +362,8 @@ results = {}
 @app.route('/optimize', methods=['POST'])
 def optimize_schedule_async():
     data = request.get_json()
-    tasks = data['tasks']
+    # CORRECTION PRINCIPALE : Faire une copie profonde des tâches pour éviter les modifications
+    tasks = copy.deepcopy(data['tasks'])
     resources = data['resources']
     method = data.get('method', 'PuLP')  # Default to PuLP
     params = data.get('params', {})  # Additional parameters
@@ -367,10 +373,45 @@ def optimize_schedule_async():
     def optimize_schedule(tasks, resources, method, params, result_id):
         try:
             now = datetime.datetime.now()
-            fixed_tasks = [t for t in tasks if 'startTime' in t and t['startTime']]
-            tasks_to_optimize = [t for t in tasks if 'startTime' not in t or not t['startTime']]
+            # CORRECTION : Utiliser la nouvelle fonction is_task_fixed
+            fixed_tasks = [t for t in tasks if is_task_fixed(t)]
+            tasks_to_optimize = [t for t in tasks if not is_task_fixed(t)]
+            
+            logger.info(f"Fixed tasks: {len(fixed_tasks)}, Tasks to optimize: {len(tasks_to_optimize)} for method {method}")
 
             if method == 'PuLP':
+                # CORRECTION : Vérifier qu'il y a des tâches à optimiser
+                if len(tasks_to_optimize) == 0:
+                    logger.warning(f"No tasks to optimize for PuLP method (result_id: {result_id})")
+                    # Calculer le makespan avec les tâches fixes existantes
+                    makespan_val = 0
+                    final_tasks = []
+                    for task in tasks:
+                        if is_task_fixed(task):
+                            start_time = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
+                            end_time = start_time + datetime.timedelta(hours=task['duration'])
+                            task_end_hours = (end_time - now).total_seconds() / 3600
+                            makespan_val = max(makespan_val, task_end_hours)
+                        final_tasks.append(task)
+                    
+                    throughput = len(tasks) / makespan_val if makespan_val > 0 else 0
+                    
+                    results[result_id] = {
+                        "status": "completed",
+                        "tasks": final_tasks,
+                        "metrics": {
+                            "makespan": makespan_val,
+                            "throughput": throughput,
+                            "resource_utilization": {},
+                            "penalties": {
+                                "deadline_violations": 0.0,
+                                "dependency_violations": 0.0,
+                                "resource_conflicts": 0.0
+                            }
+                        }
+                    }
+                    return
+
                 prob = LpProblem("Task_Scheduling", LpMinimize)
                 start_times = {task['id']: LpVariable(f"start_{task['id']}", 0) for task in tasks_to_optimize}
                 makespan = LpVariable("makespan", 0)
@@ -379,6 +420,13 @@ def optimize_schedule_async():
                 for task in tasks_to_optimize:
                     prob += makespan >= start_times[task['id']] + task['duration']
                 
+                # Contraintes pour les tâches fixes
+                for task in fixed_tasks:
+                    start_time = datetime.datetime.fromisoformat(task['startTime'].replace('Z', '+00:00'))
+                    end_time = start_time + datetime.timedelta(hours=task['duration'])
+                    task_end_hours = (end_time - now).total_seconds() / 3600
+                    prob += makespan >= task_end_hours
+                
                 # Dependency constraints
                 for task in tasks_to_optimize:
                     dependencies = task.get('dependencies', [])
@@ -386,7 +434,7 @@ def optimize_schedule_async():
                         if dep_id:
                             dep_task = next((t for t in tasks if t['id'] == dep_id), None)
                             if dep_task:
-                                if dep_task in fixed_tasks:
+                                if is_task_fixed(dep_task):
                                     dep_start_str = dep_task['startTime'].replace('Z', '')
                                     if '+' in dep_start_str:
                                         dep_start_str = dep_start_str.split('+')[0]
@@ -453,6 +501,8 @@ def optimize_schedule_async():
                             start_hour = optimized_start_times[task['id']]
                             start_time = now + datetime.timedelta(hours=start_hour)
                             task['startTime'] = start_time.isoformat()
+                            # CORRECTION : Marquer les startTime calculés
+                            task['_computed_start_time'] = True
                             end = start_time + datetime.timedelta(hours=task['duration'])
                             deadline_str = task['deadline'].replace('Z', '')
                             if '+' in deadline_str:
@@ -529,6 +579,8 @@ def optimize_schedule_async():
                         start_hour = best_solution[task['id']]
                         start_time = now + datetime.timedelta(hours=start_hour)
                         task['startTime'] = start_time.isoformat()
+                        # CORRECTION : Marquer les startTime calculés
+                        task['_computed_start_time'] = True
                         end = start_time + datetime.timedelta(hours=task['duration'])
                         deadline_str = task['deadline'].replace('Z', '')
                         if '+' in deadline_str:
