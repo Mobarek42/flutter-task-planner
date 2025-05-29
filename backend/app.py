@@ -83,9 +83,17 @@ def delete_resource(resource_id):
         conn.execute('DELETE FROM resources WHERE id = ?', (resource_id,))
     return '', 200
 
+def is_task_user_fixed(task):
+    """Détermine si une tâche a un startTime fixe défini EXPLICITEMENT par l'utilisateur"""
+    # Une tâche est considérée comme fixée par l'utilisateur seulement si :
+    # 1. Elle a un startTime
+    # 2. Ce startTime n'a PAS été calculé par un algorithme (_computed_start_time = False ou absent)
+    return ('startTime' in task and task['startTime'] and 
+            not task.get('_computed_start_time', False))
+
 def is_task_fixed(task):
     """Détermine si une tâche a un startTime fixe (défini par l'utilisateur)"""
-    return 'startTime' in task and task['startTime'] and not task.get('_computed_start_time', False)
+    return is_task_user_fixed(task)
 
 def get_initial_solution(tasks, resources):
     now = datetime.datetime.now()
@@ -367,6 +375,17 @@ def optimize_schedule_async():
     resources = data['resources']
     method = data.get('method', 'PuLP')  # Default to PuLP
     params = data.get('params', {})  # Additional parameters
+    
+    # CORRECTION CLÉE : Si pas de tâches vraiment fixes par l'utilisateur, permettre la réoptimisation
+    user_fixed_tasks = [t for t in tasks if is_task_user_fixed(t)]
+    if len(user_fixed_tasks) == 0:
+        logger.info("No user-fixed tasks found, clearing all computed start times for reoptimization")
+        for task in tasks:
+            if 'startTime' in task and task.get('_computed_start_time', False):
+                del task['startTime']
+            if '_computed_start_time' in task:
+                del task['_computed_start_time']
+    
     result_id = str(uuid.uuid4())
     results[result_id] = {"status": "pending"}
 
