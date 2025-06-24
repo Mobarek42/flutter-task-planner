@@ -11,6 +11,7 @@ import uuid
 import logging
 import copy
 import firebase_admin
+import os
 from firebase_admin import credentials, auth
 from functools import wraps
 from flask import abort
@@ -24,7 +25,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})  # Allow requests from any origin
 DATABASE = 'tasks.db'
 
 # Initialisation Firebase Admin SDK
-cred = credentials.Certificate('path/to/your/service-account.json')  # Remplace par le chemin réel
+cred = credentials.Certificate(os.getenv('FIREBASE_SERVICE_ACCOUNT', 'taskplanner-ap-firebase-adminsdk-fbsvc-e65b4f4134.json'))
 firebase_admin.initialize_app(cred)
 
 def init_db():
