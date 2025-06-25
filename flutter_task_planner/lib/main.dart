@@ -1,5 +1,3 @@
-mport 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -10,9 +8,7 @@ import 'package:intl/intl.dart';
 import 'dart:typed_data';
 
 // Entry point of the application
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
+void main() {
   runApp(const TaskPlanningApp());
 }
 
@@ -139,100 +135,7 @@ class TaskPlanningApp extends StatelessWidget {
         visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
       themeMode: ThemeMode.system,
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasData) {
-            return const HomeScreen();
-          }
-          return const AuthScreen();
-        },
-      ),
-    );
-  }
-}
-
-// Authentication screen
-class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key});
-
-  @override
-  _AuthScreenState createState() => _AuthScreenState();
-}
-
-class _AuthScreenState extends State<AuthScreen> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  String? _errorMessage;
-
-  Future<void> _signIn() async {
-    try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-      );
-    } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
-    }
-  }
-
-  Future<void> _signUp() async {
-    try {
-      await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-      );
-    } catch (e) {
-      setState(() {
-        _errorMessage = e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Connexion / Inscription')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            TextField(
-              controller: _emailController,
-              decoration: const InputDecoration(labelText: 'Email'),
-              keyboardType: TextInputType.emailAddress,
-            ),
-            TextField(
-              controller: _passwordController,
-              decoration: const InputDecoration(labelText: 'Mot de passe'),
-              obscureText: true,
-            ),
-            if (_errorMessage != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8.0),
-                child: Text(
-                  _errorMessage!,
-                  style: const TextStyle(color: Colors.red),
-                ),
-              ),
-            const SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: _signIn,
-              child: const Text('Se connecter'),
-            ),
-            ElevatedButton(
-              onPressed: _signUp,
-              child: const Text('S\'inscrire'),
-            ),
-          ],
-        ),
-      ),
+      home: const HomeScreen(),
     );
   }
 }
@@ -611,9 +514,6 @@ class _HomeScreenState extends State<HomeScreen> {
       final response = await http.delete(Uri.parse('$_baseUrl/tasks/$taskId'));
       if (response.statusCode == 200) {
         await _fetchTasks();
-      // *** FIX: Apply filters after fetching tasks ***
-        _applyFilters();
-      // ******************************************
         _showSuccess('Task deleted successfully');
       } else {
         _showError('Error deleting task: ${response.statusCode}');
@@ -625,39 +525,42 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-
-  
   // Delete a resource
   Future<void> _deleteResource(String resourceId) async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm Deletion'),
+        content: const Text('Are you sure you want to delete this resource?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
     setState(() => _isLoading = true);
-  
     try {
-      final response = await http.delete(Uri.parse("$_baseUrl/resources/$resourceId"));
-    
+      final response = await http.delete(Uri.parse('$_baseUrl/resources/$resourceId'));
       if (response.statusCode == 200) {
-        setState(() {
-          _resources.removeWhere((r) => r.id == resourceId);
-          // If the deleted resource was the current filter, reset the filter
-          if (_resourceFilter == resourceId) {
-            _resourceFilter = null;
-          }
-        });
-      
-        // Fetch tasks again as some tasks might be affected by resource deletion
-        await _fetchTasks(); 
-        // *** FIX: Apply filters after fetching tasks ***
-        _applyFilters(); 
-        // ******************************************
-        _showSuccess("Resource deleted successfully");
+        await _fetchResources();
+        _showSuccess('Resource deleted successfully');
       } else {
-        _showError("Error deleting resource: ${response.statusCode}");
+        _showError('Error deleting resource: ${response.statusCode}');
       }
     } catch (e) {
-      _showError("Error deleting resource: $e");
+      _showError('Network error: $e');
     } finally {
       setState(() => _isLoading = false);
     }
-
   }
 
   // Check task feasibility
@@ -681,96 +584,94 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  
   // Plan tasks using optimization
-Future<void> _planTasks() async {
-  if (_tasks.isEmpty) {
-    _showError('No tasks to plan');
-    return;
-  }
-  setState(() => _isLoading = true);
-  _checkFeasibility();
-  if (!_validateAllTasks(_tasks)) {
-    setState(() => _isLoading = false);
-    return;
-  }
-  try {
-    print('Sending POST to $_baseUrl/optimize with method: $_optimizationMethod');
-    final response = await http.post(
-      Uri.parse('$_baseUrl/optimize'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'tasks': _tasks.map((t) => t.toJson()).toList(),
-        'resources': _resources.map((r) => r.toJson()).toList(),
-        'method': _optimizationMethod,
-      }),
-    ).timeout(const Duration(seconds: 30), onTimeout: () {
-      throw Exception('Timeout while calling /optimize');
-    });
-
-    print('Optimize response: ${response.statusCode} - ${response.body}');
-    if (response.statusCode != 202) {
-      throw Exception('Unexpected status code from /optimize: ${response.statusCode}');
+  Future<void> _planTasks() async {
+    if (_tasks.isEmpty) {
+      _showError('No tasks to plan');
+      return;
     }
-
-    final initialData = jsonDecode(response.body) as Map<String, dynamic>;
-    if (initialData['status'] != 'pending' || initialData['id'] == null) {
-      throw Exception('Invalid response from /optimize: $initialData');
+    setState(() => _isLoading = true);
+    _checkFeasibility();
+    if (!_validateAllTasks(_tasks)) {
+      setState(() => _isLoading = false);
+      return;
     }
-
-    final resultId = initialData['id'].toString();
-    print('Starting polling for result_id: $resultId');
-
-    const maxAttempts = 30;
-    const pollingInterval = Duration(seconds: 2);
-    Map<String, dynamic>? resultData;
-    for (int i = 0; i < maxAttempts; i++) {
-      print('Polling attempt ${i + 1} for $_baseUrl/result/$resultId');
-      final resultResponse = await http.get(
-        Uri.parse('$_baseUrl/result/$resultId'),
-      ).timeout(const Duration(seconds: 10), onTimeout: () {
-        throw Exception('Timeout while polling /result/$resultId');
+    try {
+      print('Sending POST to $_baseUrl/optimize with method: $_optimizationMethod');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/optimize'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'tasks': _tasks.map((t) => t.toJson()).toList(),
+          'resources': _resources.map((r) => r.toJson()).toList(),
+          'method': _optimizationMethod,
+        }),
+      ).timeout(const Duration(seconds: 5), onTimeout: () {
+        throw Exception('Timeout while calling /optimize');
       });
 
-      print('Result response: ${resultResponse.statusCode} - ${resultResponse.body}');
-      if (resultResponse.statusCode != 200) {
-        throw Exception('Unexpected status code from /result/$resultId: ${resultResponse.statusCode}');
+      print('Optimize response: ${response.statusCode} - ${response.body}');
+      if (response.statusCode != 202) {
+        throw Exception('Unexpected status code from /optimize: ${response.statusCode}');
       }
 
-      resultData = jsonDecode(resultResponse.body) as Map<String, dynamic>;
-      print('Result data: $resultData');
-      if (resultData['status'] == 'completed') {
-        break;
-      } else if (resultData['status'] == 'failed') {
-        throw Exception('Optimization failed: ${resultData['error'] ?? 'Unknown error'}');
+      final initialData = jsonDecode(response.body) as Map<String, dynamic>;
+      if (initialData['status'] != 'pending' || initialData['id'] == null) {
+        throw Exception('Invalid response from /optimize: $initialData');
       }
-      await Future.delayed(pollingInterval);
-    }
 
-    if (resultData != null && resultData['status'] == 'completed') {
-      final completedData = resultData;
-      final optimizedTasks = (completedData['tasks'] as List<dynamic>?)?.map((t) => Task.fromJson(t as Map<String, dynamic>)).toList() ?? [];
-      setState(() {
-        _makespan = (completedData['makespan'] as num?)?.toDouble() ?? 0.0;
-        _throughput = (completedData['throughput'] as num?)?.toDouble() ?? 0.0;
-        _penalties = Map<String, double>.from(completedData['metrics']?['penalties'] as Map? ?? {});
-        _tasks = optimizedTasks;
-        _applyFilters();
-        _saveToCache();
-      });
-      print('Planning completed, tasks updated: ${_tasks.map((t) => "${t.name}: ${t.startTime}").toList()}');
-      _showSuccess('Schedule generated successfully!');
-    } else {
-      throw Exception('Failed to retrieve optimization result after $maxAttempts attempts');
+      final resultId = initialData['id'].toString();
+      print('Starting polling for result_id: $resultId');
+
+      const maxAttempts = 10;
+      const pollingInterval = Duration(seconds: 1);
+      Map<String, dynamic>? resultData;
+      for (int i = 0; i < maxAttempts; i++) {
+        print('Polling attempt ${i + 1} for $_baseUrl/result/$resultId');
+        final resultResponse = await http.get(
+          Uri.parse('$_baseUrl/result/$resultId'),
+        ).timeout(const Duration(seconds: 5), onTimeout: () {
+          throw Exception('Timeout while polling /result/$resultId');
+        });
+
+        print('Result response: ${resultResponse.statusCode} - ${resultResponse.body}');
+        if (resultResponse.statusCode != 200) {
+          throw Exception('Unexpected status code from /result/$resultId: ${resultResponse.statusCode}');
+        }
+
+        resultData = jsonDecode(resultResponse.body) as Map<String, dynamic>;
+        print('Result data: $resultData');
+        if (resultData['status'] == 'completed') {
+          break;
+        } else if (resultData['status'] == 'error') {
+          throw Exception('Optimization failed: ${resultData['error'] ?? 'Unknown error'}');
+        }
+        await Future.delayed(pollingInterval);
+      }
+
+      if (resultData != null && resultData['status'] == 'completed') {
+        final completedData = resultData;
+        final optimizedTasks = (completedData['tasks'] as List<dynamic>?)?.map((t) => Task.fromJson(t as Map<String, dynamic>)).toList() ?? [];
+        setState(() {
+          _makespan = (completedData['makespan'] as num?)?.toDouble() ?? 0.0;
+          _throughput = (completedData['throughput'] as num?)?.toDouble() ?? 0.0;
+          _penalties = Map<String, double>.from(completedData['penalties'] as Map? ?? {});
+          _tasks = optimizedTasks;
+          _applyFilters();
+          _saveToCache();
+        });
+        print('Planning completed, tasks updated: ${_tasks.map((t) => "${t.name}: ${t.startTime}").toList()}');
+        _showSuccess('Schedule generated successfully!');
+      } else {
+        throw Exception('Failed to retrieve optimization result after $maxAttempts attempts');
+      }
+    } catch (e) {
+      print('Planning error: $e');
+      _showError('Planning error: $e');
+    } finally {
+      setState(() => _isLoading = false);
     }
-  } catch (e) {
-    print('Planning error: $e');
-    _showError('Planning error: $e');
-  } finally {
-    setState(() => _isLoading = false);
   }
-}
-
 
   // Show error message
   void _showError(String message) {
